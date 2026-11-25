@@ -204,6 +204,97 @@ function test.test_function()
     end)
 end
 
+function test.subclass_fields()
+    with_job(function(job)
+        local refs = job.general_refs
+        local worker = df.general_ref_unit_workerst:new()
+        worker.unit_id = 7
+        local holder = df.general_ref_building_holderst:new()
+        holder.building_id = 9
+        refs:insert('#', worker)
+        refs:insert('#', holder)
+        dfhack.with_finalize(
+            function()
+                refs:resize(0)
+                worker:delete()
+                holder:delete()
+            end,
+            function()
+                -- a field of a derived class is nil for entries of another class
+                local out, n = df.readFields(refs, {fields={'unit_id', 'general_ref_building:building_id'}})
+                expect.eq(n, 2)
+                expect.eq(out.unit_id[1], 7)
+                expect.eq(out.unit_id[2], nil)
+                expect.eq(out['general_ref_building:building_id'][1], nil)
+                expect.eq(out['general_ref_building:building_id'][2], 9)
+
+                out, n = df.readFields(refs, {fields={'_index'}, where={{'building_id', '==', 9}}})
+                expect.table_eq(column(out, '_index', n), {1})
+                out, n = df.readFields(refs, {where={{'unit_id', '~=', 100}}})
+                expect.eq(n, 1)
+
+                expect.error_match('several classes', function() df.readFields(refs, {fields={'cached_index'}}) end)
+                out, n = df.readFields(refs, {fields={'general_ref_unit:cached_index'}})
+                expect.eq(out['general_ref_unit:cached_index'][1], worker.cached_index)
+                expect.eq(out['general_ref_unit:cached_index'][2], nil)
+                expect.error_match('does not name a class', function()
+                    df.readFields(refs, {fields={'job_item:quantity'}})
+                end)
+            end)
+    end)
+end
+
+function test.null_entries_are_skipped()
+    with_job(function(job)
+        local items = job.job_items.elements
+        local removed = items[1]
+        items[1] = nil
+        dfhack.with_finalize(function() items[1] = removed end, function()
+            local out, n = df.readFields(items, {fields={'_index', 'quantity'}})
+            expect.eq(n, 4)
+            expect.table_eq(column(out, '_index', n), {0, 2, 3, 4})
+            expect.table_eq(column(out, 'quantity', n), {3, 7, 5, 2})
+        end)
+    end)
+end
+
+function test.test_function_may_move_entries()
+    local path = df.coord_path:new()
+    dfhack.with_finalize(function() path:delete() end, function()
+        for _, v in ipairs{5, -2, 9, 0} do path.x:insert('#', v) end
+        -- growing and shrinking the vector moves its storage without changing its size
+        local out, n = df.readFields(path.x, {fields={'_value'}, test=function()
+            for _ = 1, 64 do path.x:insert('#', 0) end
+            path.x:resize(4)
+            return true
+        end})
+        expect.eq(n, 4)
+        expect.table_eq(column(out, '_value', n), {5, -2, 9, 0})
+    end)
+end
+
+function test.many_conditions()
+    with_job(function(job)
+        local where, fields = {}, {}
+        for i = 1, 60 do
+            where[i] = {'quantity', '>', -i}
+            fields[i] = i % 2 == 0 and 'quantity' or 'mat_index'
+        end
+        local out, n = df.readFields(job.job_items.elements, {fields=fields, where=where})
+        expect.eq(n, 5)
+        expect.table_eq(column(out, 'mat_index', n), {10, 20, 30, 40, 50})
+    end)
+end
+
+function test.empty_groups()
+    with_job(function(job)
+        local out, n = df.readFields(job.job_items.elements, {where={{'and'}}})
+        expect.eq(n, 5)
+        out, n = df.readFields(job.job_items.elements, {where={{'or'}}})
+        expect.eq(n, 0)
+    end)
+end
+
 function test.out_is_reused()
     with_job(function(job)
         local out = {quantity={99, 98, 97, 96, 95, 94}, other={1}}
@@ -243,6 +334,7 @@ function test.errors()
         expect.error_match('field names must be strings', function() df.readFields(items, {fields={5}}) end)
         expect.error_match('fields must be a table', function() df.readFields(items, {fields='quantity'}) end)
         expect.error_match('where must be a table', function() df.readFields(items, {where='quantity'}) end)
+        expect.error_match('list of conditions', function() df.readFields(items, {where={quantity=3}}) end)
         expect.error_match('must be a table', function() df.readFields(items, {where={'quantity'}}) end)
         expect.error_match('unknown comparison', function() df.readFields(items, {where={{'quantity', '=', 1}}}) end)
         expect.error_match('no comparison', function() df.readFields(items, {where={{'quantity'}}}) end)

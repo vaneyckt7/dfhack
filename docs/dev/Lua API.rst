@@ -492,6 +492,12 @@ The ``df`` table itself contains the following functions and values:
     Fields that hold containers, arrays or structures cannot be read. When a
     pointer on the path is null, the value is *nil*.
 
+    When the entries are objects of a class that has derived classes, a field
+    that only a derived class has can be named too, and its value is *nil* for
+    entries of any other class. If several derived classes have a field of
+    that name, write the step as ``Class:field``, for example
+    ``general_ref_unit:cached_index``.
+
   ``where``
     A list of conditions; only entries that pass all of them are returned.
     A condition is ``{field, comparison, value}``, where ``field`` is a name as
@@ -499,15 +505,16 @@ The ``df`` table itself contains the following functions and values:
     ``>``, ``>=``, or ``in`` (``value`` is then a list of accepted values).
     Conditions can be combined with ``{'and', c1, c2, ...}``,
     ``{'or', c1, c2, ...}`` and ``{'not', c}``. A condition fails when a
-    pointer on its field's path is null, or when an ordering comparison meets a
-    value of a different type. Without ``where``, or with an empty list, every
+    pointer on its field's path is null, when the entry is not of the class
+    that has the field, or when a comparison meets a value of a different type
+    (a flag is a boolean, so compare it with ``true`` or ``false``, not 1). Without ``where``, or with an empty list, every
     entry passes.
 
   ``test``
     A function that is called with the 0-based index of each entry that passed
     ``where``, and returns whether to keep it. Use it only for checks that
     ``where`` cannot express, since it is called once per entry. It must not
-    change the size of the container.
+    change the number of entries in the container.
 
   Returns ``out, n``. ``n`` is the number of entries returned, and ``out`` is a
   table with one array for each name in ``fields``, keyed by that name and

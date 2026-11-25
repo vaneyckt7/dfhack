@@ -766,11 +766,19 @@ struct ReadSource {
     int inner = 1;                          // entries per item
     bool dynamic = false;                   // the item count can change
     bool pointers = false;                  // the container holds pointers to its entries
+    bool leaf_pointers = false;             // a fixed-size array whose entries are pointers
 };
 
 struct ReadAttr {
     const enum_identity *owner;
     const struct_field_info *field;
+};
+
+// The object at offset in a path's segment must be an instance of cls for the path to go on.
+struct ReadCheck {
+    size_t segment;
+    size_t offset;
+    const virtual_identity *cls;
 };
 
 struct ReadAccessor {
@@ -784,6 +792,7 @@ struct ReadAccessor {
     int bit_size = 1;
     size_t whole_size = 0;
     std::vector<ReadAttr> attrs;
+    std::vector<ReadCheck> checks;
 };
 
 struct ReadCond {
@@ -838,6 +847,42 @@ const struct_field_info *read_find_field(const struct_identity *type, const std:
     return nullptr;
 }
 
+const struct_field_info *read_own_field(const struct_identity *type, const std::string &name)
+{
+    auto field = type->getFields();
+    if (!field)
+        return nullptr;
+    for (; field->mode != struct_field_info::END; field++)
+        if (field->name && name == field->name)
+            return field;
+    return nullptr;
+}
+
+// The classes derived from type that declare a field of this name themselves.
+void read_find_in_subclasses(const struct_identity *type, const std::string &name,
+                             std::vector<const struct_identity*> &found)
+{
+    for (auto child : type->getChildren())
+    {
+        if (read_own_field(child, name))
+            found.push_back(child);
+        else
+            read_find_in_subclasses(child, name, found);
+    }
+}
+
+const struct_identity *read_find_subclass(const struct_identity *type, const std::string &name)
+{
+    for (auto child : type->getChildren())
+    {
+        if (name == child->getName())
+            return child;
+        if (auto deeper = read_find_subclass(child, name))
+            return deeper;
+    }
+    return nullptr;
+}
+
 void read_add_source(lua_State *state, ReadPlan &plan, int idx, const std::string &name)
 {
     if (lua_type(state, idx) != LUA_TUSERDATA)
@@ -876,6 +921,14 @@ void read_add_source(lua_State *state, ReadPlan &plan, int idx, const std::strin
         }
     }
     src.leaf_size = src.leaf->byte_size();
+    if (!src.pointers && src.leaf->type() == IDTYPE_POINTER)
+    {
+        auto target = ((const df::pointer_identity*)src.leaf)->getTarget();
+        if (!target)
+            luaL_error(state, "df.readFields: cannot read a container of untyped pointers");
+        src.leaf_pointers = true;
+        src.leaf = target;
+    }
     plan.sources.push_back(src);
 }
 
@@ -944,9 +997,44 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path)
 
         if (read_is_struct(cur))
         {
-            auto field = read_find_field((const struct_identity*)cur, part);
+            auto owner_type = (const struct_identity*)cur;
+            std::string field_name = part;
+            const struct_identity *narrowed = nullptr;
+            size_t colon = part.find(':');
+            if (colon != std::string::npos)
+            {
+                // Class:field reads a field of a class derived from the declared one
+                field_name = part.substr(colon + 1);
+                if (cur->type() == IDTYPE_CLASS)
+                    narrowed = read_find_subclass(owner_type, part.substr(0, colon));
+                if (!narrowed)
+                    luaL_error(state, "df.readFields: '%s' in '%s' does not name a class derived from %s",
+                               part.substr(0, colon).c_str(), path.c_str(), cur->getFullName().c_str());
+            }
+            auto field = read_find_field(narrowed ? narrowed : owner_type, field_name);
+            if (!field && !narrowed && cur->type() == IDTYPE_CLASS)
+            {
+                std::vector<const struct_identity*> found;
+                read_find_in_subclasses(owner_type, field_name, found);
+                if (found.size() > 1)
+                    luaL_error(state, "df.readFields: several classes derived from %s have a field '%s'; "
+                                      "write it as Class:%s in '%s'", cur->getFullName().c_str(),
+                               field_name.c_str(), field_name.c_str(), path.c_str());
+                if (found.size() == 1)
+                {
+                    narrowed = found[0];
+                    field = read_own_field(narrowed, field_name);
+                }
+            }
             if (!field)
-                luaL_error(state, "df.readFields: no field '%s' in '%s'", part.c_str(), path.c_str());
+                luaL_error(state, "df.readFields: no field '%s' in '%s'", field_name.c_str(), path.c_str());
+            if (narrowed)
+            {
+                if (narrowed->type() != IDTYPE_CLASS)
+                    luaL_error(state, "df.readFields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
+                acc.checks.push_back(ReadCheck{acc.offsets.size() - 1, acc.offsets.back(),
+                                               (const virtual_identity*)narrowed});
+            }
             switch (field->mode)
             {
             case struct_field_info::PRIMITIVE:
@@ -957,7 +1045,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path)
                 cur = field->type;
                 break;
             case struct_field_info::POINTER:
-                if (!field->type || (field->count & PTRFLAG_IS_ARRAY))
+                if (!field->type || (field->count & (PTRFLAG_IS_ARRAY | PTRFLAG_HAS_BAD_POINTERS)))
                     luaL_error(state, "df.readFields: cannot follow the pointer '%s' in '%s'", part.c_str(), path.c_str());
                 acc.offsets.back() += field->offset;
                 acc.offsets.push_back(0);
@@ -1020,14 +1108,24 @@ bool read_push(lua_State *state, const ReadAccessor &acc, const std::vector<uint
         return true;
     }
 
-    uint8_t *ptr = bases[acc.source] + acc.offsets[0];
-    for (size_t i = 1; i < acc.offsets.size(); i++)
+    uint8_t *ptr = bases[acc.source];
+    size_t check = 0;
+    for (size_t i = 0; i < acc.offsets.size(); i++)
     {
-        ptr = *(uint8_t**)ptr;
+        if (i > 0)
+            ptr = *(uint8_t**)ptr;
         if (!ptr)
         {
             lua_pushnil(state);
             return false;
+        }
+        for (; check < acc.checks.size() && acc.checks[check].segment == i; check++)
+        {
+            if (!acc.checks[check].cls->is_instance(virtual_ptr(ptr + acc.checks[check].offset)))
+            {
+                lua_pushnil(state);
+                return false;
+            }
         }
         ptr += acc.offsets[i];
     }
@@ -1103,7 +1201,8 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
         luaL_error(state, "df.readFields: a condition must start with a field name, 'and', 'or' or 'not'");
     std::string head = lua_tostring(state, -2);
 
-    if (lua_istable(state, -1) && (head == "and" || head == "or" || head == "not"))
+    if ((lua_istable(state, -1) && (head == "and" || head == "or" || head == "not")) ||
+        (lua_isnil(state, -1) && (head == "and" || head == "or")))
     {
         cond.kind = head == "and" ? ReadCond::AND : head == "or" ? ReadCond::OR : ReadCond::NOT;
         int count = int(lua_rawlen(state, idx));
@@ -1300,6 +1399,12 @@ static int meta_read_fields(lua_State *state)
             int where_idx = lua_gettop(state);
             ReadCond all;
             int count = int(lua_rawlen(state, where_idx));
+            if (count == 0)
+            {
+                lua_pushnil(state);
+                if (lua_next(state, where_idx))
+                    luaL_error(state, "df.readFields: where must be a list of conditions");
+            }
             for (int i = 1; i <= count; i++)
             {
                 lua_rawgeti(state, where_idx, i);
@@ -1359,9 +1464,8 @@ static int meta_read_fields(lua_State *state)
     }
 
     std::vector<uint8_t*> bases(plan.sources.size());
-    lua_Integer found = 0;
-    for (lua_Integer index = 0; index < total; index++)
-    {
+    // Finds where each container keeps this entry. False when one of them holds a null pointer there.
+    auto locate = [&plan, &bases](lua_Integer index) {
         bool present = true;
         for (size_t i = 0; i < plan.sources.size(); i++)
         {
@@ -1375,12 +1479,20 @@ static int meta_read_fields(lua_State *state)
                 entry = (uint8_t*)src.container->raw_item_pointer(src.item, src.ptr, outer);
                 if (entry)
                     entry += size_t(index % src.inner) * src.leaf_size;
+                if (entry && src.leaf_pointers)
+                    entry = *(uint8_t**)entry;
             }
             if (!entry)
                 present = false;
             bases[i] = entry;
         }
-        if (!present)
+        return present;
+    };
+
+    lua_Integer found = 0;
+    for (lua_Integer index = 0; index < total; index++)
+    {
+        if (!locate(index))
             continue;
 
         if (has_where && !read_test(state, plan, root, bases, index))
@@ -1396,7 +1508,8 @@ static int meta_read_fields(lua_State *state)
             for (const ReadSource &src : plan.sources)
                 if (src.dynamic && src.container->raw_item_count(src.ptr) != src.outer)
                     luaL_error(state, "df.readFields: a container changed size during the read");
-            if (!keep)
+            // the function may have moved or replaced the entry
+            if (!keep || !locate(index))
                 continue;
         }
 
