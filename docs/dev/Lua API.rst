@@ -496,7 +496,7 @@ The ``df`` table itself contains the following functions and values:
     that only a derived class has can be named too, and its value is *nil* for
     entries of any other class. If several derived classes have a field of
     that name, write the step as ``Class:field``, for example
-    ``general_ref_unit:cached_index``.
+    ``general_ref_building:building_id``.
 
   ``where``
     A list of conditions; only entries that pass all of them are returned.
