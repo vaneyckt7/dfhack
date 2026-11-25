@@ -923,7 +923,7 @@ void read_add_source(lua_State *state, ReadPlan &plan, int idx, const std::strin
     src.leaf_size = src.leaf->byte_size();
     if (!src.pointers && src.leaf->type() == IDTYPE_POINTER)
     {
-        auto target = ((const df::pointer_identity*)src.leaf)->getTarget();
+        auto target = ((const pointer_identity_base*)src.leaf)->getTarget();
         if (!target)
             luaL_error(state, "df.readFields: cannot read a container of untyped pointers");
         src.leaf_pointers = true;
