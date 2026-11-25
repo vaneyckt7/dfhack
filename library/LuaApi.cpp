@@ -124,6 +124,7 @@ distribution.
 #include <numeric>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <filesystem>
 #include <stdexcept>
@@ -2996,16 +2997,15 @@ opt_lua_tile_fn(lua_State *L, int tbl, const char *key, bool truthy = false)
 }
 
 // Read a cuboid of map tiles from the start of the argument list. Accepted
-// forms: {x1,y1,z1,x2,y2,z2} | pos1, pos2 | x1,y1,z1,x2,y2,z2. Sets next to
-// the index of the first argument after the bounds.
-static cuboid check_cuboid_args(lua_State *L, int &next)
+// forms: {x1,y1,z1,x2,y2,z2} | pos1, pos2 | x1,y1,z1,x2,y2,z2. Returns the
+// cuboid and the index of the first argument after it.
+static std::pair<cuboid, int> check_cuboid_args(lua_State *L)
 {
     if (lua_isnumber(L, 1)) {
-        next = 7;
-        return cuboid(
+        return { cuboid(
             (int16_t)luaL_checkinteger(L, 1), (int16_t)luaL_checkinteger(L, 2),
             (int16_t)luaL_checkinteger(L, 3), (int16_t)luaL_checkinteger(L, 4),
-            (int16_t)luaL_checkinteger(L, 5), (int16_t)luaL_checkinteger(L, 6));
+            (int16_t)luaL_checkinteger(L, 5), (int16_t)luaL_checkinteger(L, 6)), 7 };
     }
     if (lua_istable(L, 1) && luaL_len(L, 1) == 6) {
         int16_t v[6];
@@ -3014,20 +3014,17 @@ static cuboid check_cuboid_args(lua_State *L, int &next)
             v[i] = (int16_t)luaL_checkinteger(L, -1);
             lua_pop(L, 1);
         }
-        next = 2;
-        return cuboid(v[0], v[1], v[2], v[3], v[4], v[5]);
+        return { cuboid(v[0], v[1], v[2], v[3], v[4], v[5]), 2 };
     }
     df::coord p1, p2;
     Lua::CheckDFAssign(L, &p1, 1);
     Lua::CheckDFAssign(L, &p2, 2);
-    next = 3;
-    return cuboid(p1, p2);
+    return { cuboid(p1, p2), 3 };
 }
 
 static int maps_forEachTile(lua_State *L)
 {
-    int spec_base;
-    cuboid bounds = check_cuboid_args(L, spec_base);
+    auto [bounds, spec_base] = check_cuboid_args(L);
 
     Maps::TileFilter filter;
     Maps::TileActions actions;
@@ -3130,16 +3127,22 @@ static int maps_forEachTile(lua_State *L)
 
 static int maps_readFlows(lua_State *L)
 {
-    int spec_base;
-    cuboid bounds = check_cuboid_args(L, spec_base);
+    auto [bounds, spec_base] = check_cuboid_args(L);
     int fidx = spec_base, oidx = spec_base + 1;
 
     std::unordered_set<int16_t> types;
     int min_density = std::numeric_limits<int>::min();
+    bool include_dead = false;
     if (lua_istable(L, fidx)) {
         parse_enum_set<df::flow_type>(L, fidx, "type", types);
         parse_enum_set<df::flow_type>(L, fidx, "types", types);
-        get_int_field(L, &min_density, fidx, "min_density", min_density);
+        lua_getfield(L, fidx, "min_density");
+        if (!lua_isnil(L, -1))
+            min_density = (int)luaL_checkinteger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, fidx, "include_dead");
+        include_dead = lua_toboolean(L, -1);
+        lua_pop(L, 1);
     }
     else if (!lua_isnoneornil(L, fidx))
         return luaL_error(L, "readFlows: filter must be a table");
@@ -3171,7 +3174,8 @@ static int maps_readFlows(lua_State *L)
 
     lua_Integer n = 0;
     Maps::forEachFlow(bounds, [&](df::flow_info *flow) {
-        if (flow->density < min_density ||
+        if ((flow->flags.bits.DEAD && !include_dead) ||
+            flow->density < min_density ||
             (!types.empty() && !types.contains((int16_t)flow->type)))
             return true;
         n++;

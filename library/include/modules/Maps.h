@@ -566,7 +566,9 @@ DFHACK_EXPORT TileScanResult forEachTile(
  *
  * The cuboid is clamped to the loaded map. Flows are found through the map
  * block that holds them, in the block order of cuboid::forBlock; unallocated
- * blocks are skipped. Return false from fn to stop early.
+ * blocks are skipped. Spent flows that the game keeps around for reuse (those
+ * with flags.bits.DEAD set) are visited too. Return false from fn to stop
+ * early.
  *
  * Returns the number of flows that fn was called for.
  */

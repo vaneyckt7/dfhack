@@ -1935,9 +1935,9 @@ int64_t Maps::forEachFlow(
         return visited;
 
     bool aborted = false;
-    bounds.forBlock([&](df::map_block *block, cuboid area) {
+    bounds.forBlock([&](df::map_block *block, cuboid) {
         for (auto *flow : block->flows) {
-            if (!flow || !area.containsPos(flow->pos))
+            if (!flow || !bounds.containsPos(flow->pos))
                 continue;
             visited++;
             if (!fn(flow)) {

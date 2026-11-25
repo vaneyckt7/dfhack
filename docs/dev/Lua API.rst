@@ -2721,6 +2721,9 @@ Maps module
   - ``type``/``types``: a flow type or array of flow types (numbers or
     ``df.flow_type`` names). The flow's type must be one of them.
   - ``min_density``: the flow's density must be at least this value.
+  - ``include_dead``: if true, also read spent flows that the game keeps
+    around for reuse (those with ``flags.DEAD`` set). They are skipped by
+    default.
 
   Returns a table with the field ``n`` (the number of flows read) and one
   array per flow field, each indexed from 1 to ``n``: ``type``, ``density``,
