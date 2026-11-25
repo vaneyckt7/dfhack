@@ -117,6 +117,7 @@ distribution.
 #include <lualib.h>
 #include <lauxlib.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -3129,6 +3130,10 @@ static int maps_forEachTile(lua_State *L)
 
 static int maps_readFlows(lua_State *L)
 {
+    static constexpr std::array<const char *, 7> names = {
+        "type", "density", "x", "y", "z", "mat_type", "mat_index"
+    };
+
     const auto args = check_cuboid_args(L);
     const cuboid &bounds = args.first;
     const int spec_base = args.second;
@@ -3137,6 +3142,8 @@ static int maps_readFlows(lua_State *L)
     std::unordered_set<int16_t> types;
     int min_density = std::numeric_limits<int>::min();
     bool include_dead = false;
+    // which of the fields in names to read, in the order asked for
+    std::vector<size_t> fields;
     if (lua_istable(L, fidx)) {
         parse_enum_set<df::flow_type>(L, fidx, "type", types);
         parse_enum_set<df::flow_type>(L, fidx, "types", types);
@@ -3147,9 +3154,35 @@ static int maps_readFlows(lua_State *L)
         lua_getfield(L, fidx, "include_dead");
         include_dead = lua_toboolean(L, -1) != 0;
         lua_pop(L, 1);
+        lua_getfield(L, fidx, "fields");
+        if (!lua_isnil(L, -1)) {
+            luaL_checktype(L, -1, LUA_TTABLE);
+            int spec = lua_absindex(L, -1);
+            int count = (int)luaL_len(L, spec);
+            for (int i = 1; i <= count; i++) {
+                lua_rawgeti(L, spec, i);
+                const char *name = lua_tostring(L, -1);
+                size_t found = names.size();
+                for (size_t j = 0; name && j < names.size(); j++)
+                    if (strcmp(name, names[j]) == 0)
+                        found = j;
+                if (found == names.size())
+                    return luaL_error(L, "readFlows: unknown field '%s'", name ? name : "?");
+                if (std::find(fields.begin(), fields.end(), found) == fields.end())
+                    fields.push_back(found);
+                lua_pop(L, 1);
+            }
+        }
+        else
+            for (size_t j = 0; j < names.size(); j++)
+                fields.push_back(j);
+        lua_pop(L, 1);
     }
     else if (!lua_isnoneornil(L, fidx))
-        return luaL_error(L, "readFlows: filter must be a table");
+        return luaL_error(L, "readFlows: options must be a table");
+    else
+        for (size_t j = 0; j < names.size(); j++)
+            fields.push_back(j);
 
     if (lua_isnoneornil(L, oidx))
         lua_newtable(L);
@@ -3159,21 +3192,18 @@ static int maps_readFlows(lua_State *L)
     }
     int out = lua_absindex(L, -1);
 
-    // One array per field, created on first use and reused afterwards.
-    static constexpr std::array<const char *, 7> names = {
-        "type", "density", "x", "y", "z", "mat_type", "mat_index"
-    };
-    std::array<int, names.size()> cols;
+    // One array per field read, created on first use and reused afterwards.
+    std::array<int, names.size()> cols = {};
     luaL_checkstack(L, (int)names.size() + 4, "readFlows");
-    for (size_t i = 0; i < names.size(); i++) {
-        lua_getfield(L, out, names[i]);
+    for (size_t field : fields) {
+        lua_getfield(L, out, names[field]);
         if (!lua_istable(L, -1)) {
             lua_pop(L, 1);
             lua_newtable(L);
             lua_pushvalue(L, -1);
-            lua_setfield(L, out, names[i]);
+            lua_setfield(L, out, names[field]);
         }
-        cols[i] = lua_absindex(L, -1);
+        cols[field] = lua_absindex(L, -1);
     }
 
     lua_Integer n = 0;
@@ -3183,14 +3213,19 @@ static int maps_readFlows(lua_State *L)
             (!types.empty() && !types.contains((int16_t)flow->type)))
             return true;
         n++;
-        const std::array<lua_Integer, names.size()> values = {
-            (lua_Integer)flow->type, flow->density,
-            flow->pos.x, flow->pos.y, flow->pos.z,
-            flow->mat_type, flow->mat_index
-        };
-        for (size_t i = 0; i < names.size(); i++) {
-            lua_pushinteger(L, values[i]);
-            lua_rawseti(L, cols[i], n);
+        for (size_t field : fields) {
+            lua_Integer value = 0;
+            switch (field) {
+                case 0: value = (lua_Integer)flow->type; break;
+                case 1: value = flow->density; break;
+                case 2: value = flow->pos.x; break;
+                case 3: value = flow->pos.y; break;
+                case 4: value = flow->pos.z; break;
+                case 5: value = flow->mat_type; break;
+                case 6: value = flow->mat_index; break;
+            }
+            lua_pushinteger(L, value);
+            lua_rawseti(L, cols[field], n);
         }
         return true;
     });

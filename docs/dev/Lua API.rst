@@ -2702,7 +2702,7 @@ Maps module
     })
     print(res.matched)
 
-* ``dfhack.maps.readFlows(bounds[, filter[, out]])``
+* ``dfhack.maps.readFlows(bounds[, options[, out]])``
 
   Reads the flows (waves, mist, smoke, miasma, and so on) positioned inside
   a cuboid of map tiles in a single native call. This is much faster than
@@ -2715,8 +2715,8 @@ Maps module
   cuboid is clamped to the loaded map and unallocated map blocks are
   skipped.
 
-  The *filter* argument may be *nil* to read all flows, or a table with the
-  following keys (all optional; a flow must satisfy every given criterion):
+  The *options* argument may be *nil*, or a table with the following keys
+  (all optional). A flow is read only if it satisfies every criterion given:
 
   - ``type``/``types``: a flow type or array of flow types (numbers or
     ``df.flow_type`` names). The flow's type must be one of them.
@@ -2724,10 +2724,12 @@ Maps module
   - ``include_dead``: if true, also read spent flows that the game keeps
     around for reuse (those with ``flags.DEAD`` set). They are skipped by
     default.
+  - ``fields``: an array of the names of the flow fields to read, out of
+    ``type``, ``density``, ``x``, ``y``, ``z``, ``mat_type``, and
+    ``mat_index``. All of them are read by default; reading fewer is faster.
 
   Returns a table with the field ``n`` (the number of flows read) and one
-  array per flow field, each indexed from 1 to ``n``: ``type``, ``density``,
-  ``x``, ``y``, ``z``, ``mat_type``, and ``mat_index``. If a table is passed
+  array per field read, each indexed from 1 to ``n``. If a table is passed
   as *out*, it is filled and returned instead of a new table, so a caller
   that polls can reuse the same arrays. Array entries past ``n`` left over
   from an earlier, longer read are not cleared.

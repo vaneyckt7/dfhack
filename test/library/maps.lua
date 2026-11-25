@@ -327,6 +327,17 @@ function test.readFlows()
     expect.eq(xs, out.x)
     expect.eq(#mists, out.n)
 
+    -- only the fields asked for are filled
+    local some = dfhack.maps.readFlows(bounds, {fields = {'density', 'x'}})
+    expect.eq(#found, some.n)
+    expect.nil_(some.type)
+    expect.nil_(some.mat_index)
+    for i, flow in ipairs(found) do
+        expect.eq(flow[2], some.density[i])
+        expect.eq(flow[3], some.x[i])
+    end
+    expect.error_match('unknown field', function() dfhack.maps.readFlows(bounds, {fields = {'colour'}}) end)
+
     -- dead flows are skipped unless asked for
     smoke.flags.DEAD = true
     expect.table_eq(block_flows({block}), (read_flows(bounds)))
@@ -336,7 +347,7 @@ function test.readFlows()
     smoke.flags.DEAD = false
 
     expect.error_match('unknown type', function() dfhack.maps.readFlows(bounds, {type = 'NoSuchFlow'}) end)
-    expect.error_match('filter must be a table', function() dfhack.maps.readFlows(bounds, 5) end)
+    expect.error_match('options must be a table', function() dfhack.maps.readFlows(bounds, 5) end)
     expect.error(function() dfhack.maps.readFlows(bounds, {min_density = 0.5}) end)
 
     mist.density = 0
