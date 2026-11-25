@@ -3156,7 +3156,8 @@ static int maps_readFlows(lua_State *L)
         lua_pop(L, 1);
         lua_getfield(L, fidx, "fields");
         if (!lua_isnil(L, -1)) {
-            luaL_checktype(L, -1, LUA_TTABLE);
+            if (!lua_istable(L, -1))
+                return luaL_error(L, "readFlows: fields must be a table");
             int spec = lua_absindex(L, -1);
             int count = (int)luaL_len(L, spec);
             for (int i = 1; i <= count; i++) {
@@ -3168,6 +3169,7 @@ static int maps_readFlows(lua_State *L)
                         found = j;
                 if (found == names.size())
                     return luaL_error(L, "readFlows: unknown field '%s'", name ? name : "?");
+                // (at most one entry per field: the stack reserved below counts on it)
                 if (std::find(fields.begin(), fields.end(), found) == fields.end())
                     fields.push_back(found);
                 lua_pop(L, 1);

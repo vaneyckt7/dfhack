@@ -337,6 +337,25 @@ function test.readFlows()
         expect.eq(flow[3], some.x[i])
     end
     expect.error_match('unknown field', function() dfhack.maps.readFlows(bounds, {fields = {'colour'}}) end)
+    expect.error_match('fields must be a table', function() dfhack.maps.readFlows(bounds, {fields = 'density'}) end)
+    -- a field named many times is read once
+    local repeated = {}
+    for i = 1, 200 do repeated[i] = i % 2 == 0 and 'density' or 'mat_type' end
+    local twice = dfhack.maps.readFlows(bounds, {fields = repeated})
+    expect.eq(#found, twice.n)
+    for i, flow in ipairs(found) do
+        expect.eq(flow[2], twice.density[i])
+        expect.eq(flow[6], twice.mat_type[i])
+    end
+    -- no fields: only the count
+    local none = dfhack.maps.readFlows(bounds, {fields = {}})
+    expect.eq(#found, none.n)
+    expect.nil_(none.density)
+    -- a stale array of a field not asked for is left alone
+    local kept = dfhack.maps.readFlows(bounds)
+    local old_type = kept.type
+    dfhack.maps.readFlows(bounds, {fields = {'density'}}, kept)
+    expect.eq(old_type, kept.type)
 
     -- dead flows are skipped unless asked for
     smoke.flags.DEAD = true

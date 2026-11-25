@@ -2732,7 +2732,8 @@ Maps module
   array per field read, each indexed from 1 to ``n``. If a table is passed
   as *out*, it is filled and returned instead of a new table, so a caller
   that polls can reuse the same arrays. Array entries past ``n`` left over
-  from an earlier, longer read are not cleared.
+  from an earlier, longer read are not cleared, and neither are the arrays
+  of fields that this read was not asked for.
 
   Example::
 
