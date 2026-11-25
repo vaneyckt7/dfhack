@@ -2702,6 +2702,41 @@ Maps module
     })
     print(res.matched)
 
+* ``dfhack.maps.readFlows(bounds[, filter[, out]])``
+
+  Reads the flows (waves, mist, smoke, miasma, and so on) positioned inside
+  a cuboid of map tiles in a single native call. This is much faster than
+  walking ``block.flows`` and reading each flow's fields from Lua.
+
+  .. note::
+     This API is experimental and may change in future releases.
+
+  The *bounds* argument takes the same forms as for ``forEachTile``. The
+  cuboid is clamped to the loaded map and unallocated map blocks are
+  skipped.
+
+  The *filter* argument may be *nil* to read all flows, or a table with the
+  following keys (all optional; a flow must satisfy every given criterion):
+
+  - ``type``/``types``: a flow type or array of flow types (numbers or
+    ``df.flow_type`` names). The flow's type must be one of them.
+  - ``min_density``: the flow's density must be at least this value.
+
+  Returns a table with the field ``n`` (the number of flows read) and one
+  array per flow field, each indexed from 1 to ``n``: ``type``, ``density``,
+  ``x``, ``y``, ``z``, ``mat_type``, and ``mat_index``. If a table is passed
+  as *out*, it is filled and returned instead of a new table, so a caller
+  that polls can reuse the same arrays. Array entries past ``n`` left over
+  from an earlier, longer read are not cleared.
+
+  Example::
+
+    local flows = dfhack.maps.readFlows({x1,y1,z,x2,y2,z},
+        {type = df.flow_type.OceanWave, min_density = 1})
+    for i = 1, flows.n do
+        print(flows.x[i], flows.y[i], flows.density[i])
+    end
+
 Burrows module
 --------------
 

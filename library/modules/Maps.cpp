@@ -1926,3 +1926,26 @@ Maps::TileScanResult Maps::forEachTile(
 
     return result;
 }
+
+int64_t Maps::forEachFlow(
+    const cuboid &bounds, std::function<bool(df::flow_info *flow)> fn)
+{
+    int64_t visited = 0;
+    if (!IsValid())
+        return visited;
+
+    bool aborted = false;
+    bounds.forBlock([&](df::map_block *block, cuboid area) {
+        for (auto *flow : block->flows) {
+            if (!flow || !area.containsPos(flow->pos))
+                continue;
+            visited++;
+            if (!fn(flow)) {
+                aborted = true;
+                break;
+            }
+        }
+        return !aborted;
+    });
+    return visited;
+}

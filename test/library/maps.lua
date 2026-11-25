@@ -245,3 +245,84 @@ function test.forEachTile_construct()
         expect.eq(0, res2.constructed)
     end)
 end
+
+-- Reads the flows of one block the slow way, for comparison with readFlows.
+local function block_flows(block, flow_type, min_density)
+    local found = {}
+    for _, flow in ipairs(block.flows) do
+        if (not flow_type or flow.type == flow_type) and
+            (not min_density or flow.density >= min_density)
+        then
+            table.insert(found, {flow.type, flow.density, flow.pos.x, flow.pos.y,
+                flow.pos.z, flow.mat_type, flow.mat_index})
+        end
+    end
+    return found
+end
+
+local function read_flows(...)
+    local flows = dfhack.maps.readFlows(...)
+    local found = {}
+    for i = 1, flows.n do
+        table.insert(found, {flows.type[i], flows.density[i], flows.x[i], flows.y[i],
+            flows.z[i], flows.mat_type[i], flows.mat_index[i]})
+    end
+    return found, flows
+end
+
+function test.readFlows()
+    local block = first_block()
+    local p = block.map_pos
+    local bounds = block_bounds(block)
+    local mist = dfhack.maps.spawnFlow(xyz2pos(p.x + 3, p.y + 4, p.z),
+        df.flow_type.Mist, 0, -1, 40)
+    local smoke = dfhack.maps.spawnFlow(xyz2pos(p.x + 9, p.y + 2, p.z),
+        df.flow_type.Smoke, 0, -1, 90)
+    expect.true_(mist)
+    expect.true_(smoke)
+
+    -- all flows in the block, in the block's own order
+    local found, flows = read_flows(bounds)
+    expect.eq(#block.flows, flows.n)
+    expect.table_eq(block_flows(block), found)
+
+    -- the three forms of bounds agree
+    expect.table_eq(found, (read_flows(table.unpack(bounds))))
+    expect.table_eq(found, (read_flows(xyz2pos(p.x, p.y, p.z), xyz2pos(p.x + 15, p.y + 15, p.z))))
+
+    -- filter by type, by name or number, singly or as a list
+    local mists = block_flows(block, df.flow_type.Mist)
+    expect.table_eq(mists, (read_flows(bounds, {type = df.flow_type.Mist})))
+    expect.table_eq(mists, (read_flows(bounds, {type = 'Mist'})))
+    local both = {}
+    for _, flow in ipairs(found) do
+        if flow[1] == df.flow_type.Mist or flow[1] == df.flow_type.Smoke then
+            table.insert(both, flow)
+        end
+    end
+    expect.table_eq(both, (read_flows(bounds, {types = {'Mist', df.flow_type.Smoke}})))
+    expect.table_eq(block_flows(block, nil, 50), (read_flows(bounds, {min_density = 50})))
+
+    -- only flows positioned inside the bounds are read
+    local one = read_flows(p.x + 3, p.y + 4, p.z, p.x + 3, p.y + 4, p.z)
+    for _, flow in ipairs(one) do
+        expect.eq(p.x + 3, flow[3])
+        expect.eq(p.y + 4, flow[4])
+    end
+    expect.lt(0, #one)
+
+    -- a passed table is filled and returned, and its arrays are reused
+    local out = {}
+    local first = dfhack.maps.readFlows(bounds, nil, out)
+    expect.eq(out, first)
+    local xs = out.x
+    dfhack.maps.readFlows(bounds, {type = df.flow_type.Mist}, out)
+    expect.eq(xs, out.x)
+    expect.eq(#mists, out.n)
+
+    expect.error_match('unknown type', function() dfhack.maps.readFlows(bounds, {type = 'NoSuchFlow'}) end)
+    expect.error_match('filter must be a table', function() dfhack.maps.readFlows(bounds, 5) end)
+
+    mist.density = 0
+    smoke.density = 0
+end

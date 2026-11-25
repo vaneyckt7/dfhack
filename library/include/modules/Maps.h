@@ -559,6 +559,19 @@ struct DFHACK_EXPORT TileScanResult {
  */
 DFHACK_EXPORT TileScanResult forEachTile(
     const cuboid &bounds, const TileFilter &filter, const TileActions &actions);
+
+/**
+ * Call fn for every flow (wave, mist, smoke, miasma, and so on) positioned
+ * inside a cuboid of map tiles.
+ *
+ * The cuboid is clamped to the loaded map. Flows are found through the map
+ * block that holds them, in the block order of cuboid::forBlock; unallocated
+ * blocks are skipped. Return false from fn to stop early.
+ *
+ * Returns the number of flows that fn was called for.
+ */
+DFHACK_EXPORT int64_t forEachFlow(
+    const cuboid &bounds, std::function<bool(df::flow_info *flow)> fn);
 }
 }
 #endif

@@ -82,6 +82,7 @@ distribution.
 #include "df/enabler.h"
 #include "df/feature_init.h"
 #include "df/flow_info.h"
+#include "df/flow_type.h"
 #include "df/general_ref.h"
 #include "df/histfig_entity_link_positionst.h"
 #include "df/historical_figure.h"
@@ -116,7 +117,9 @@ distribution.
 #include <lualib.h>
 #include <lauxlib.h>
 
+#include <array>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <string>
@@ -2878,7 +2881,7 @@ static int maps_addItemSpatter(lua_State *L)
 }
 
 /*
- * Spec-table parsing helpers for maps_forEachTile.
+ * Spec-table parsing helpers for maps_forEachTile and maps_readFlows.
  */
 
 // Resolve an enum value given as a number or as a DFHack enum item name.
@@ -2891,9 +2894,9 @@ static int check_enum_int(lua_State *L, int idx, const char *context)
         E val;
         if (find_enum_item(&val, lua_tostring(L, idx)))
             return (int)val;
-        luaL_error(L, "forEachTile: unknown %s '%s'", context, lua_tostring(L, idx));
+        luaL_error(L, "dfhack.maps: unknown %s '%s'", context, lua_tostring(L, idx));
     }
-    luaL_error(L, "forEachTile: %s must be a number or enum name", context);
+    luaL_error(L, "dfhack.maps: %s must be a number or enum name", context);
     return 0;
 }
 
@@ -2933,11 +2936,11 @@ static void parse_bitfield_spec(lua_State *L, int tbl, const char *key,
     lua_pushnil(L);
     while (lua_next(L, spec)) {
         if (lua_type(L, -2) != LUA_TSTRING)
-            luaL_error(L, "forEachTile: %s field names must be strings", key);
+            luaL_error(L, "dfhack.maps: %s field names must be strings", key);
         const char *name = lua_tostring(L, -2);
         unsigned idx;
         if (!find_bitfield_field(&idx, name, (BF*)NULL))
-            luaL_error(L, "forEachTile: unknown %s field '%s'", key, name);
+            luaL_error(L, "dfhack.maps: unknown %s field '%s'", key, name);
         int width = df::bitfield_traits<BF>::bits[idx].size;
         int value;
         if (lua_isboolean(L, -1))
@@ -2945,7 +2948,7 @@ static void parse_bitfield_spec(lua_State *L, int tbl, const char *key,
         else
             value = (int)luaL_checkinteger(L, -1);
         if (value < 0 || value >= (1 << width))
-            luaL_error(L, "forEachTile: %s.%s value %d out of range", key, name, value);
+            luaL_error(L, "dfhack.maps: %s.%s value %d out of range", key, name, value);
         uint32_t fmask = ((1u << width) - 1) << idx;
         mask |= fmask;
         bits |= (uint32_t)value << idx & fmask;
@@ -2992,35 +2995,39 @@ opt_lua_tile_fn(lua_State *L, int tbl, const char *key, bool truthy = false)
     return {};
 }
 
-static int maps_forEachTile(lua_State *L)
+// Read a cuboid of map tiles from the start of the argument list. Accepted
+// forms: {x1,y1,z1,x2,y2,z2} | pos1, pos2 | x1,y1,z1,x2,y2,z2. Sets next to
+// the index of the first argument after the bounds.
+static cuboid check_cuboid_args(lua_State *L, int &next)
 {
-    // Bounds forms: {x1,y1,z1,x2,y2,z2} | pos1, pos2 | x1,y1,z1,x2,y2,z2
-    cuboid bounds;
-    int spec_base;
     if (lua_isnumber(L, 1)) {
-        bounds = cuboid(
+        next = 7;
+        return cuboid(
             (int16_t)luaL_checkinteger(L, 1), (int16_t)luaL_checkinteger(L, 2),
             (int16_t)luaL_checkinteger(L, 3), (int16_t)luaL_checkinteger(L, 4),
             (int16_t)luaL_checkinteger(L, 5), (int16_t)luaL_checkinteger(L, 6));
-        spec_base = 7;
     }
-    else if (lua_istable(L, 1) && luaL_len(L, 1) == 6) {
+    if (lua_istable(L, 1) && luaL_len(L, 1) == 6) {
         int16_t v[6];
         for (int i = 0; i < 6; i++) {
             lua_rawgeti(L, 1, i + 1);
             v[i] = (int16_t)luaL_checkinteger(L, -1);
             lua_pop(L, 1);
         }
-        bounds = cuboid(v[0], v[1], v[2], v[3], v[4], v[5]);
-        spec_base = 2;
+        next = 2;
+        return cuboid(v[0], v[1], v[2], v[3], v[4], v[5]);
     }
-    else {
-        df::coord p1, p2;
-        Lua::CheckDFAssign(L, &p1, 1);
-        Lua::CheckDFAssign(L, &p2, 2);
-        bounds = cuboid(p1, p2);
-        spec_base = 3;
-    }
+    df::coord p1, p2;
+    Lua::CheckDFAssign(L, &p1, 1);
+    Lua::CheckDFAssign(L, &p2, 2);
+    next = 3;
+    return cuboid(p1, p2);
+}
+
+static int maps_forEachTile(lua_State *L)
+{
+    int spec_base;
+    cuboid bounds = check_cuboid_args(L, spec_base);
 
     Maps::TileFilter filter;
     Maps::TileActions actions;
@@ -3121,6 +3128,71 @@ static int maps_forEachTile(lua_State *L)
     return 1;
 }
 
+static int maps_readFlows(lua_State *L)
+{
+    int spec_base;
+    cuboid bounds = check_cuboid_args(L, spec_base);
+    int fidx = spec_base, oidx = spec_base + 1;
+
+    std::unordered_set<int16_t> types;
+    int min_density = std::numeric_limits<int>::min();
+    if (lua_istable(L, fidx)) {
+        parse_enum_set<df::flow_type>(L, fidx, "type", types);
+        parse_enum_set<df::flow_type>(L, fidx, "types", types);
+        get_int_field(L, &min_density, fidx, "min_density", min_density);
+    }
+    else if (!lua_isnoneornil(L, fidx))
+        return luaL_error(L, "readFlows: filter must be a table");
+
+    if (lua_isnoneornil(L, oidx))
+        lua_newtable(L);
+    else {
+        luaL_checktype(L, oidx, LUA_TTABLE);
+        lua_pushvalue(L, oidx);
+    }
+    int out = lua_absindex(L, -1);
+
+    // One array per field, created on first use and reused afterwards.
+    static constexpr std::array<const char *, 7> names = {
+        "type", "density", "x", "y", "z", "mat_type", "mat_index"
+    };
+    std::array<int, names.size()> cols;
+    luaL_checkstack(L, (int)names.size() + 4, "readFlows");
+    for (size_t i = 0; i < names.size(); i++) {
+        lua_getfield(L, out, names[i]);
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_setfield(L, out, names[i]);
+        }
+        cols[i] = lua_absindex(L, -1);
+    }
+
+    lua_Integer n = 0;
+    Maps::forEachFlow(bounds, [&](df::flow_info *flow) {
+        if (flow->density < min_density ||
+            (!types.empty() && !types.contains((int16_t)flow->type)))
+            return true;
+        n++;
+        const std::array<lua_Integer, names.size()> values = {
+            (lua_Integer)flow->type, flow->density,
+            flow->pos.x, flow->pos.y, flow->pos.z,
+            flow->mat_type, flow->mat_index
+        };
+        for (size_t i = 0; i < names.size(); i++) {
+            lua_pushinteger(L, values[i]);
+            lua_rawseti(L, cols[i], n);
+        }
+        return true;
+    });
+
+    lua_pushinteger(L, n);
+    lua_setfield(L, out, "n");
+    lua_settop(L, out);
+    return 1;
+}
+
 static const luaL_Reg dfhack_maps_funcs[] = {
     { "isValidTilePos", maps_isValidTilePos },
     { "isTileVisible", maps_isTileVisible },
@@ -3143,6 +3215,7 @@ static const luaL_Reg dfhack_maps_funcs[] = {
     { "addMaterialSpatter", maps_addMaterialSpatter },
     { "addItemSpatter", maps_addItemSpatter },
     { "forEachTile", maps_forEachTile },
+    { "readFlows", maps_readFlows },
     { NULL, NULL }
 };
 

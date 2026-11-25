@@ -66,8 +66,10 @@ Template for new versions:
 ## Documentation
 
 ## API
+- ``Maps::forEachFlow``: call a function for every flow positioned inside a cuboid of map tiles
 
 ## Lua
+- ``dfhack.maps.readFlows``: read the type, density, position, and material of every flow inside a cuboid of map tiles in one native call
 
 ## Removed
 
