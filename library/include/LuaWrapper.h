@@ -77,6 +77,7 @@ namespace LuaWrapper {
     constexpr auto DFHACK_IS_INSTANCE_NAME = "DFHack::IsInstance";
     constexpr auto DFHACK_DELETE_NAME = "DFHack::Delete";
     constexpr auto DFHACK_CAST_NAME = "DFHack::Cast";
+    constexpr auto DFHACK_READ_FIELDS_NAME = "DFHack::ReadFields";
 
     extern LuaToken DFHACK_EMPTY_TABLE_TOKEN;
 

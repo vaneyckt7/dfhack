@@ -457,6 +457,65 @@ The ``df`` table itself contains the following functions and values:
 
   Returns *nil* if NULL, or a ref.
 
+* ``df.readFields(container[, options[, out]])``
+
+  Reads chosen fields from every entry of a container into flat Lua arrays in
+  one call, which is much faster than indexing each entry from Lua. This
+  function is experimental and its interface may change.
+
+  ``container`` is a container ref, for example a vector of structures, a
+  vector of numbers, or a fixed-size array. Nested fixed-size arrays are read
+  as one flat list, first index first, so a 16x16 array has 256 entries and
+  entry ``[x][y]`` has the 0-based index ``x*16+y``. A vector of pointers is
+  read as the structures it points to, and null entries are skipped.
+
+  It may instead be a table that maps names to containers with the same number
+  of entries, which are then read side by side. Every field name then starts
+  with the name of the container it refers to::
+
+    local out, n = df.readFields(
+        {tt=block.tiletype, des=block.designation},
+        {fields={'_index', 'des.flow_size'},
+         where={{'tt.shape', '==', df.tiletype_shape.FLOOR},
+                {'des.hidden', '==', false}}})
+
+  ``options`` is a table that can contain:
+
+  ``fields``
+    A list of field names to read. A name is a path of steps separated by
+    dots. A step can be a field of a structure (``pos.x``), a pointer field,
+    which is followed (``item.id``), a flag of a bitfield
+    (``flags.DEAD``), or an attribute of an enum value
+    (``item_type.caption``). A bitfield named without a flag is read as its
+    whole numeric value. ``_index`` is the 0-based index of the entry, and
+    ``_value`` is the entry itself when the container holds plain values.
+    Fields that hold containers, arrays or structures cannot be read. When a
+    pointer on the path is null, the value is *nil*.
+
+  ``where``
+    A list of conditions; only entries that pass all of them are returned.
+    A condition is ``{field, comparison, value}``, where ``field`` is a name as
+    described above and ``comparison`` is one of ``==``, ``~=``, ``<``, ``<=``,
+    ``>``, ``>=``, or ``in`` (``value`` is then a list of accepted values).
+    Conditions can be combined with ``{'and', c1, c2, ...}``,
+    ``{'or', c1, c2, ...}`` and ``{'not', c}``. A condition fails when a
+    pointer on its field's path is null, or when an ordering comparison meets a
+    value of a different type. Without ``where``, or with an empty list, every
+    entry passes.
+
+  ``test``
+    A function that is called with the 0-based index of each entry that passed
+    ``where``, and returns whether to keep it. Use it only for checks that
+    ``where`` cannot express, since it is called once per entry. It must not
+    change the size of the container.
+
+  Returns ``out, n``. ``n`` is the number of entries returned, and ``out`` is a
+  table with one array for each name in ``fields``, keyed by that name and
+  indexed from 1 to ``n``. If ``out`` is passed in, it and the arrays it
+  already holds are reused. Array entries past ``n`` are not cleared, and
+  neither are arrays for fields that this read was not asked for. Without
+  ``fields``, only the count is useful.
+
 .. _lua-api-table-assignment:
 
 Recursive table assignment

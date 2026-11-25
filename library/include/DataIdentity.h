@@ -156,6 +156,10 @@ namespace DFHack
 
         virtual bool lua_insert2(lua_State *state, int fname_idx, void *ptr, int idx, int val_index) const;
 
+        // The item count and an item's address, for readers that do not go through a Lua metamethod.
+        int raw_item_count(void *ptr) const { return item_count(ptr, COUNT_LEN); }
+        void *raw_item_pointer(const type_identity *item, void *ptr, int idx) const { return item_pointer(item, ptr, idx); }
+
     protected:
         virtual int item_count(void *ptr, CountMode cnt) const = 0;
         virtual void *item_pointer(const type_identity *item, void *ptr, int idx) const = 0;
