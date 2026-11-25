@@ -3024,7 +3024,9 @@ static std::pair<cuboid, int> check_cuboid_args(lua_State *L)
 
 static int maps_forEachTile(lua_State *L)
 {
-    auto [bounds, spec_base] = check_cuboid_args(L);
+    const auto args = check_cuboid_args(L);
+    const cuboid &bounds = args.first;
+    const int spec_base = args.second;
 
     Maps::TileFilter filter;
     Maps::TileActions actions;
@@ -3127,7 +3129,9 @@ static int maps_forEachTile(lua_State *L)
 
 static int maps_readFlows(lua_State *L)
 {
-    auto [bounds, spec_base] = check_cuboid_args(L);
+    const auto args = check_cuboid_args(L);
+    const cuboid &bounds = args.first;
+    const int spec_base = args.second;
     int fidx = spec_base, oidx = spec_base + 1;
 
     std::unordered_set<int16_t> types;
@@ -3141,7 +3145,7 @@ static int maps_readFlows(lua_State *L)
             min_density = (int)luaL_checkinteger(L, -1);
         lua_pop(L, 1);
         lua_getfield(L, fidx, "include_dead");
-        include_dead = lua_toboolean(L, -1);
+        include_dead = lua_toboolean(L, -1) != 0;
         lua_pop(L, 1);
     }
     else if (!lua_isnoneornil(L, fidx))
