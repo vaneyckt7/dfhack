@@ -457,7 +457,7 @@ The ``df`` table itself contains the following functions and values:
 
   Returns *nil* if NULL, or a ref.
 
-* ``df.readFields(container[, options[, out]])``
+* ``df.readFields(container[, options[, out[, ranges]]])``
 
   Reads chosen fields from every entry of a container into flat Lua arrays in
   one call, which is much faster than indexing each entry from Lua. This
@@ -496,6 +496,42 @@ The ``df`` table itself contains the following functions and values:
     local out, n = df.readFields(
         {block_a.flows, block_b.flows},
         {fields={'_from', 'type', 'density'}, where={{'density', '>', 0}}})
+
+  A read can be limited to a range of a container, so that the entries
+  outside it are neither tested by ``where`` nor returned, and are not even
+  visited. Since a list holds many containers, each of which may need its own
+  range, the range is given for each item and not in ``options``. When the
+  item is a table of named containers, the key ``_range`` of that table holds
+  its range (``_range`` is not the name of a container). For a container of
+  numbers or of structures it is ``{first, last}``, the 0-based indexes of the
+  first and the last entry wanted, both included. For a container of
+  containers, such as a 16x16 array, it is ``{first1, last1, first2, last2}``:
+  the range of the first index, then of the second. ``{first1, last1}`` alone
+  keeps every entry of the items in that range. Entries keep the ``_index``
+  they have without a range, so ``x*16+y`` for ``[x][y]``. Numbers outside the
+  container are clamped to it, and a range that holds nothing, because
+  ``first`` is after ``last`` or because it lies outside the container, reads
+  nothing. A range that is not a table of 2 or 4 whole numbers (decimals such
+  as ``3.0`` are fine, ``0.5`` and ``math.huge`` are not) is an error. This
+  reads the tiles from x 2 to 4 and y 3 to 5 of two map blocks, each with
+  its own rectangle::
+
+    local out, n = df.readFields(
+        {{des=block_a.designation, tt=block_a.tiletype, _range={2, 4, 3, 5}},
+         {des=block_b.designation, tt=block_b.tiletype, _range={0, 15, 10, 15}}},
+        {fields={'_from', '_index', 'des.flow_size'}, where={{'tt.shape', '==', df.tiletype_shape.FLOOR}}})
+
+  Ranges can also be passed in ``ranges`` (the fourth argument), a list that
+  has the range of the first item at 1, that of the second at 2, and so on,
+  with *nil* for an item that has none. This is for containers that are not
+  inside a table, and for one container, whose range is then ``ranges[1]``::
+
+    local out, n = df.readFields({block_a.designation, block_b.designation},
+        {fields={'_index', 'flow_size'}}, nil, {{2, 4, 3, 5}, {0, 15, 10, 15}})
+
+  An item that has a range in both ways is an error. When the containers of a
+  table are read side by side, a range needs them to be arranged the same way
+  (all 16x16, say).
 
   ``options`` is a table that can contain:
 
@@ -559,9 +595,11 @@ The ``df`` table itself contains the following functions and values:
 
   Sets up a read once, for code that does the same read again and again.
   Takes what ``df.readFields`` (above) takes, and returns a function
-  ``read(container[, out])`` that does that read on any container, table of
-  named containers, or list of them, of the same kind as the one given here,
-  and returns ``out, n`` in the same way. The options are taken in when the
+  ``read(container[, out[, ranges]])`` that does that read on any container,
+  table of named containers, or list of them, of the same kind as the one
+  given here, and returns ``out, n`` in the same way. The ranges, whether in
+  ``_range`` or in ``ranges``, are not part of the setup and can be different
+  on every call. The options are taken in when the
   read is set up; changing the options table afterwards has no effect on it.
   The container passed here only shows what kind of container will be read.
   Like ``df.readFields``, this function is experimental::

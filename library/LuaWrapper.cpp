@@ -894,6 +894,15 @@ struct ReadCursor {
     bool item_ok = false;
 };
 
+// The part of a container one read is limited to, already clamped to what the container holds:
+// outer items first1 to last1 and, in each of them, entries first2 to last2, all counted from 0.
+struct ReadRange {
+    bool set = false;
+    bool empty = false;
+    int first1 = 0, last1 = -1;
+    int first2 = 0, last2 = -1;
+};
+
 bool read_is_struct(const type_identity *type)
 {
     switch (type->type())
@@ -2075,6 +2084,89 @@ ReadFrom read_from(lua_State *state, int idx)
     return READ_ONE;
 }
 
+// Turns the table of numbers at idx into a range of a container that holds outer items. The range
+// is {first, last}, or {first, last, first2, last2} to limit the entries inside each item too.
+void read_parse_range(lua_State *state, const ReadPlan &plan, int idx, int outer, ReadRange &range)
+{
+    if (!lua_istable(state, idx))
+        luaL_error(state, "df.readFields: a range must be a table of 2 or 4 whole numbers");
+    lua_Integer count = lua_Integer(lua_rawlen(state, idx));
+    if (count != 2 && count != 4)
+        luaL_error(state, "df.readFields: a range must be a table of 2 or 4 whole numbers");
+    lua_Integer value[4] = {0, 0, 0, 0};
+    for (int i = 0; i < count; i++)
+    {
+        int is_whole = 0;
+        lua_rawgeti(state, idx, i + 1);
+        if (lua_type(state, -1) == LUA_TNUMBER)
+            value[i] = lua_tointegerx(state, -1, &is_whole);
+        lua_pop(state, 1);
+        if (!is_whole)
+            luaL_error(state, "df.readFields: the numbers in a range must be whole numbers");
+    }
+
+    const lua_Integer inner = plan.sources[0].inner;
+    for (const ReadSource &src : plan.sources)
+        if (src.inner != plan.sources[0].inner)
+            luaL_error(state, "df.readFields: a range needs containers that are all arranged the same way");
+    if (count == 4 && inner == 1)
+        luaL_error(state, "df.readFields: a range of 4 numbers needs a container of containers");
+
+    lua_Integer first1 = value[0], last1 = value[1];
+    lua_Integer first2 = 0, last2 = inner - 1;
+    if (count == 4)
+    {
+        first2 = value[2];
+        last2 = value[3];
+    }
+    first1 = std::max<lua_Integer>(first1, 0);
+    last1 = std::min<lua_Integer>(last1, outer - 1);
+    first2 = std::max<lua_Integer>(first2, 0);
+    last2 = std::min<lua_Integer>(last2, inner - 1);
+
+    range.set = true;
+    range.empty = first1 > last1 || first2 > last2;
+    if (!range.empty)
+    {
+        range.first1 = int(first1);
+        range.last1 = int(last1);
+        range.first2 = int(first2);
+        range.last2 = int(last2);
+    }
+}
+
+// Looks for the range of the place-th item of the list, which is the table at item_idx when it is
+// one of named containers, or entry place of the list of ranges at ranges_idx (0 when there is none).
+void read_find_range(lua_State *state, const ReadPlan &plan, int item_idx, int ranges_idx,
+                     lua_Integer place, int outer, ReadRange &range)
+{
+    bool found = false;
+    if (plan.named && lua_istable(state, item_idx))
+    {
+        lua_pushliteral(state, "_range");
+        lua_rawget(state, item_idx);
+        if (lua_isnil(state, -1))
+            lua_pop(state, 1);
+        else
+            found = true;
+    }
+    if (ranges_idx)
+    {
+        lua_rawgeti(state, ranges_idx, place);
+        if (lua_isnil(state, -1))
+            lua_pop(state, 1);
+        else if (found)
+            luaL_error(state, "df.readFields: item %d has a range both as '_range' and in the list of ranges",
+                       int(place));
+        else
+            found = true;
+    }
+    if (!found)
+        return;
+    read_parse_range(state, plan, lua_gettop(state), outer, range);
+    lua_pop(state, 1);
+}
+
 // Sets a read up for the container, or table of named containers, at first_idx and the options at
 // options_idx. Pushes the test function, or nil when there is none.
 void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx)
@@ -2089,6 +2181,12 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
             if (lua_type(state, -2) != LUA_TSTRING)
                 luaL_error(state, "df.readFields: containers in a table must have string names");
             std::string name = lua_tostring(state, -2);
+            if (name == "_range")
+            {
+                // the range of this item, not a container
+                lua_pop(state, 1);
+                continue;
+            }
             if (name.empty() || name == "_index" || name == "_from" || name.find('.') != std::string::npos)
                 luaL_error(state, "df.readFields: '%s' cannot be used as a container name", name.c_str());
             read_add_source(state, plan, lua_gettop(state), name);
@@ -2171,9 +2269,10 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
 
 // Does a read that has been set up. from_idx holds what to read from: a list of containers (or of
 // tables of named ones) when is_list is set, else just the one. first_bound says the plan was set
-// up from the first of them a moment ago, so that one need not be looked at again.
+// up from the first of them a moment ago, so that one need not be looked at again. ranges_idx holds
+// a list of ranges, one for each place, or is 0.
 int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list, int out_idx, int test_idx,
-             bool first_bound)
+             bool first_bound, int ranges_idx)
 {
     luaL_checkstack(state, int(plan.names.size()) + 20, "df.readFields: too many fields");
 
@@ -2241,9 +2340,55 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
     };
 
     lua_Integer found = 0;
+    lua_Integer place = 0;
+
+    // Looks at the entry at index, which the cursors are at, and keeps it if it passes.
+    auto visit = [&](lua_Integer index) {
+        if (!locate())
+            return;
+
+        if (plan.has_where && !read_test(plan, plan.root, bases, index))
+            return;
+
+        if (plan.has_test)
+        {
+            lua_pushvalue(state, test_idx);
+            lua_pushinteger(state, index);
+            lua_call(state, 1, 1);
+            bool keep = lua_toboolean(state, -1) != 0;
+            lua_pop(state, 1);
+            for (size_t i = 0; i < source_count; i++)
+                if (plan.sources[i].dynamic &&
+                    plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
+                    luaL_error(state, "df.readFields: a container changed size during the read");
+            // the function may have moved or replaced the entry
+            for (ReadCursor &cursor : cursors)
+                cursor.item_ok = false;
+            if (!keep || !locate())
+                return;
+        }
+
+        found++;
+        for (size_t i = 0; i < plan.columns.size(); i++)
+        {
+            const ReadAccessor &acc = plan.accessors[plan.columns[i]];
+            if (acc.kind == ReadAccessor::FROM)
+                lua_pushinteger(state, place);
+            else
+                read_push(state, acc, bases, index);
+            lua_rawseti(state, column_base + 1 + int(i), found);
+        }
+    };
+
     lua_Integer places = is_list ? lua_Integer(lua_rawlen(state, from_idx)) : 1;
-    for (lua_Integer place = 1; place <= places; place++)
+    for (place = 1; place <= places; place++)
     {
+        if (is_list)
+            lua_rawgeti(state, from_idx, place);
+        else
+            lua_pushvalue(state, from_idx);
+        const int item_idx = lua_gettop(state);
+
         lua_Integer total;
         if (place == 1 && first_bound)
         {
@@ -2255,51 +2400,33 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             total = lua_Integer(plan.sources[0].outer) * plan.sources[0].inner;
         }
         else
-        {
-            if (is_list)
-                lua_rawgeti(state, from_idx, place);
-            else
-                lua_pushvalue(state, from_idx);
-            total = read_bind(state, plan, lua_gettop(state), bound);
-            lua_pop(state, 1);
-        }
+            total = read_bind(state, plan, item_idx, bound);
+
+        ReadRange range;
+        read_find_range(state, plan, item_idx, ranges_idx, place, bound[0].outer, range);
+        lua_pop(state, 1);
+
         std::fill(cursors.begin(), cursors.end(), ReadCursor());
 
-        for (lua_Integer index = 0; index < total; index++, advance())
+        if (!range.set)
         {
-            if (!locate())
-                continue;
-
-            if (plan.has_where && !read_test(plan, plan.root, bases, index))
-                continue;
-
-            if (plan.has_test)
+            for (lua_Integer index = 0; index < total; index++, advance())
+                visit(index);
+        }
+        else if (!range.empty)
+        {
+            // only the range is walked; every container has the same inner size, as checked above
+            const lua_Integer inner = plan.sources[0].inner;
+            for (int outer = range.first1; outer <= range.last1; outer++)
             {
-                lua_pushvalue(state, test_idx);
-                lua_pushinteger(state, index);
-                lua_call(state, 1, 1);
-                bool keep = lua_toboolean(state, -1) != 0;
-                lua_pop(state, 1);
-                for (size_t i = 0; i < source_count; i++)
-                    if (plan.sources[i].dynamic &&
-                        plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
-                        luaL_error(state, "df.readFields: a container changed size during the read");
-                // the function may have moved or replaced the entry
                 for (ReadCursor &cursor : cursors)
+                {
+                    cursor.outer = outer;
+                    cursor.inner = range.first2;
                     cursor.item_ok = false;
-                if (!keep || !locate())
-                    continue;
-            }
-
-            found++;
-            for (size_t i = 0; i < plan.columns.size(); i++)
-            {
-                const ReadAccessor &acc = plan.accessors[plan.columns[i]];
-                if (acc.kind == ReadAccessor::FROM)
-                    lua_pushinteger(state, place);
-                else
-                    read_push(state, acc, bases, index);
-                lua_rawseti(state, column_base + 1 + int(i), found);
+                }
+                for (int at = range.first2; at <= range.last2; at++, advance())
+                    visit(lua_Integer(outer) * inner + at);
             }
         }
     }
@@ -2321,17 +2448,25 @@ void read_check_out(lua_State *state, int idx)
         luaL_error(state, "df.readFields: out must be a table");
 }
 
+// The list of ranges at idx, if there is one, must be a table.
+void read_check_ranges(lua_State *state, int idx)
+{
+    if (!lua_isnil(state, idx) && !lua_istable(state, idx))
+        luaL_error(state, "df.readFields: ranges must be a table");
+}
+
 }
 
 static int meta_read_fields(lua_State *state)
 {
     int argc = lua_gettop(state);
-    if (argc < 1 || argc > 3)
-        luaL_error(state, "Usage: df.readFields(container[, options[, out]])");
-    lua_settop(state, 3);
+    if (argc < 1 || argc > 4)
+        luaL_error(state, "Usage: df.readFields(container[, options[, out[, ranges]]])");
+    lua_settop(state, 4);
     if (!lua_isnil(state, 2) && !lua_istable(state, 2))
         luaL_error(state, "df.readFields: options must be a table");
     read_check_out(state, 3);
+    read_check_ranges(state, 4);
     luaL_checkstack(state, 20, "df.readFields");
 
     ReadFrom from = read_from(state, 1);
@@ -2347,10 +2482,10 @@ static int meta_read_fields(lua_State *state)
         lua_rawgeti(state, 1, 1);
     else
         lua_pushvalue(state, 1);
-    // stack: [container, options, out, first]
-    read_setup(state, plan, 4, 2);
-    // stack: [container, options, out, first, test]
-    return read_run(state, plan, 1, from == READ_LIST, 3, 5, true);
+    // stack: [container, options, out, ranges, first]
+    read_setup(state, plan, 5, 2);
+    // stack: [container, options, out, ranges, first, test]
+    return read_run(state, plan, 1, from == READ_LIST, 3, 6, true, lua_isnil(state, 4) ? 0 : 4);
 }
 
 static int read_plan_gc(lua_State *state)
@@ -2363,10 +2498,11 @@ static int read_plan_gc(lua_State *state)
 static int read_prepared_call(lua_State *state)
 {
     int argc = lua_gettop(state);
-    if (argc < 1 || argc > 2)
-        luaL_error(state, "Usage: read(container[, out]), with read made by df.prepareReadFields");
-    lua_settop(state, 2);
+    if (argc < 1 || argc > 3)
+        luaL_error(state, "Usage: read(container[, out[, ranges]]), with read made by df.prepareReadFields");
+    lua_settop(state, 3);
     read_check_out(state, 2);
+    read_check_ranges(state, 3);
     luaL_checkstack(state, 20, "df.readFields");
 
     ReadFrom from = read_from(state, 1);
@@ -2379,8 +2515,8 @@ static int read_prepared_call(lua_State *state)
 
     auto plan = (const ReadPlan*)lua_touserdata(state, lua_upvalueindex(2));
     lua_pushvalue(state, lua_upvalueindex(3));
-    // stack: [container, out, test]
-    return read_run(state, *plan, 1, from == READ_LIST, 2, 3, false);
+    // stack: [container, out, ranges, test]
+    return read_run(state, *plan, 1, from == READ_LIST, 2, 4, false, lua_isnil(state, 3) ? 0 : 3);
 }
 
 static int meta_prepare_read_fields(lua_State *state)
