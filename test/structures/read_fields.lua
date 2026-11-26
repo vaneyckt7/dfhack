@@ -952,6 +952,38 @@ function test.range_on_a_vector()
     end)
 end
 
+function test.range_in_the_wrong_place()
+    with_block(function(block)
+        local des = block.designation
+        local opts = {fields={'_index'}}
+        -- on the list around the containers instead of on a table of named containers
+        expect.error_match("'_range' was given on the list", function()
+            df.read_fields({des, des, _range={0, 1}}, opts)
+        end)
+        expect.error_match("'_range' was given on the list", function()
+            df.read_fields({{des=des}, {des=des}, _range={0, 0, 0, 0}}, opts)
+        end)
+        local read = df.prepare_read_fields({{des=des}}, opts)
+        expect.error_match("'_range' was given on the list", function()
+            read({{des=des}, _range={0, 0, 0, 0}})
+        end)
+        -- on a list of objects
+        local a, b = df.coord:new(), df.coord:new()
+        dfhack.with_finalize(
+            function() a:delete() b:delete() end,
+            function()
+                expect.error_match("'_range' was given on the list", function()
+                    df.read_fields({a, b, _range={0, 0}}, {fields={'x'}})
+                end)
+                local _, n = df.read_fields({a, b}, {fields={'x'}})
+                expect.eq(n, 2)
+            end)
+        -- where it belongs
+        local _, n = df.read_fields({{des=des, _range={0, 0, 0, 0}}, {des=des}}, opts)
+        expect.eq(n, 257)
+    end)
+end
+
 function test.range_on_a_grid()
     with_block(function(block)
         local function read(range, where)

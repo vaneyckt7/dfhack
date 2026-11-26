@@ -532,7 +532,8 @@ The ``df`` table itself contains the following functions and values:
   structures of one type, or of classes that derive from one class (fields
   are looked up in the nearest class they all derive from), and
   ``_index`` is then the place of the object in the list, from 1. A list of
-  objects cannot have names or ranges::
+  objects cannot have names or ranges; ``_range`` on a list, of objects or of
+  containers, is an error::
 
     local out, n = df.read_fields(my_units,
         {fields={'id', 'pos.x', 'pos.y'}, where={{'flags1.inactive', '==', false}}})

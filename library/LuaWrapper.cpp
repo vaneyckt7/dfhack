@@ -867,7 +867,6 @@ struct ReadScalar {
     size_t len = 0;
 };
 
-void read_scalar_from_lua(lua_State *state, int idx, ReadScalar &out);
 
 // Calls a function that DF objects offer, with the arguments on the stack from base on, and leaves
 // what it gives back on top of them.
@@ -3044,6 +3043,18 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
              int each_idx, bool first_bound)
 {
     luaL_checkstack(state, int(plan.names.size()) + 20, "df.read_fields: too many fields");
+
+    // a range belongs to one table of named containers; on the list around them, or on a list of
+    // plain containers or of objects, it would go unread
+    if (is_list)
+    {
+        lua_pushliteral(state, "_range");
+        lua_rawget(state, from_idx);
+        if (!lua_isnil(state, -1))
+            luaL_error(state, "df.read_fields: '_range' was given on the list; it goes in a table of "
+                              "named containers, next to the containers it limits");
+        lua_pop(state, 1);
+    }
 
     // one array per field, each at a fixed stack index; none when the entries go to a function
     int column_base = lua_gettop(state);
