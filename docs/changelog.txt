@@ -70,7 +70,6 @@ Template for new versions:
 ## Lua
 - ``df.read_fields``: read chosen fields from every entry of a container (or of several same-sized containers) into flat arrays in one native call, optionally keeping only the entries that pass a set of conditions, and optionally limited to a range of indexes (``_range``) so that other entries are not visited. A field or the left side of a condition can be ``{call=fn, args={paths}}``, a function that is handed what the paths read
 - ``df.prepare_read_fields``: set a ``df.read_fields`` read up once and reuse it, for code that repeats the same read
-- ``df.write_fields``: write columns of values, in the shape ``df.read_fields`` returns them, to chosen entries of a container (or of a run of entries behind a pointer, with ``count``) in one native call
 
 ## Removed
 
