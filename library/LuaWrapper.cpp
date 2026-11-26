@@ -3637,7 +3637,7 @@ static int meta_write_fields(lua_State *state)
             read_describe_source(state, 1, src);
             // containers that an assignment in Lua refuses to change
             if (src.container->is_readonly() ||
-                (src.outer > 0 && !dynamic_cast<const buffer_container_identity*>(src.container) &&
+                (src.outer > 0 && src.container->type() != IDTYPE_BUFFER &&
                  src.container->lua_item_count(state, src.ptr, container_identity::COUNT_WRITE) <= 0))
                 luaL_error(state, "df.write_fields: %s is read-only", id->getFullName().c_str());
         }
