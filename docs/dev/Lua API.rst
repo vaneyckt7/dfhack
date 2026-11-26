@@ -467,7 +467,10 @@ The ``df`` table itself contains the following functions and values:
   vector of numbers, or a fixed-size array. Nested fixed-size arrays are read
   as one flat list, first index first, so a 16x16 array has 256 entries and
   entry ``[x][y]`` has the 0-based index ``x*16+y``. A vector of pointers is
-  read as the structures it points to, and null entries are skipped.
+  read as the structures it points to, and null entries are skipped. As with a
+  loop in Lua, the pointers in the container must be valid: a container that
+  the game leaves holding stale pointers (the ``temp_save`` and ``order_load``
+  vectors, for example) is not safe to read.
 
   It may instead be a table that maps names to containers with the same number
   of entries, which are then read side by side. Every field name then starts
@@ -478,6 +481,9 @@ The ``df`` table itself contains the following functions and values:
         {fields={'_index', 'des.flow_size'},
          where={{'tt.shape', '==', df.tiletype_shape.FLOOR},
                 {'des.hidden', '==', false}}})
+
+  An entry is skipped when any of the named containers holds a null pointer
+  at that position.
 
   ``options`` is a table that can contain:
 

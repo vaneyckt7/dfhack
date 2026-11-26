@@ -1027,7 +1027,8 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path)
                 }
             }
             if (!field)
-                luaL_error(state, "df.readFields: no field '%s' in '%s'", field_name.c_str(), path.c_str());
+                luaL_error(state, "df.readFields: no field '%s' in %s (path '%s')", field_name.c_str(),
+                           cur->getFullName().c_str(), path.c_str());
             if (narrowed)
             {
                 if (narrowed->type() != IDTYPE_CLASS)
