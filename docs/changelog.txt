@@ -68,6 +68,8 @@ Template for new versions:
 ## API
 
 ## Lua
+- ``df.readFields``: read chosen fields from every entry of a container (or of several same-sized containers) into flat arrays in one native call, optionally keeping only the entries that pass a set of conditions
+- ``df.prepareReadFields``: set a ``df.readFields`` read up once and reuse it, for code that repeats the same read
 
 ## Removed
 

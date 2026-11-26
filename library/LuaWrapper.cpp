@@ -24,6 +24,11 @@ distribution.
 
 #include "Internal.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <new>
+#include <string_view>
 #include <string>
 #include <vector>
 #include <map>
@@ -748,9 +753,1671 @@ static int meta_new(lua_State *state)
     return 1;
 }
 
-/**
- * Method: type casting of pointers.
+/*
+ * df.readFields: read chosen fields from every entry of a container in one call.
  */
+namespace {
+
+struct ReadSource {
+    std::string name;
+    const container_identity *container = nullptr;
+    const type_identity *item = nullptr;    // what the container holds
+    const type_identity *leaf = nullptr;    // one entry, after flattening nested fixed-size arrays
+    uint8_t *ptr = nullptr;
+    size_t leaf_size = 0;
+    int outer = 0;                          // items in the container itself
+    int inner = 1;                          // entries per item
+    bool dynamic = false;                   // the item count can change
+    bool pointers = false;                  // the container holds pointers to its entries
+    bool leaf_pointers = false;             // a fixed-size array whose entries are pointers
+};
+
+// How a value lies in memory, which decides how a condition reads it.
+enum ReadLeaf { LEAF_INT, LEAF_BOOL, LEAF_FLOAT, LEAF_DOUBLE, LEAF_STRING, LEAF_CSTRING, LEAF_OTHER };
+
+struct ReadAttr {
+    const enum_identity *owner;
+    const struct_field_info *field;
+    size_t size = 0;                        // of the attribute when Lua reads it as an integer, else 0
+    bool is_signed = false;
+    ReadLeaf leaf = LEAF_OTHER;
+};
+
+// The object at offset in a path's segment must be an instance of cls for the path to go on.
+struct ReadCheck {
+    size_t segment;
+    size_t offset;
+    const virtual_identity *cls;
+};
+
+struct ReadAccessor {
+    // PTR is a pointer field itself, which a condition can only test for being null. FROM is the
+    // place in the list of the containers an entry came from.
+    enum Kind { INDEX, FROM, VALUE, BIT, WHOLE, PTR };
+    Kind kind = VALUE;
+    size_t source = 0;
+    // offsets[0] is added to the entry's address; every further one follows a pointer first
+    std::vector<size_t> offsets;
+    const type_identity *type = nullptr;
+    unsigned bit = 0;
+    int bit_size = 1;
+    size_t whole_size = 0;
+    std::vector<ReadAttr> attrs;
+    std::vector<ReadCheck> checks;
+    // Set when a condition can take the short way for whole numbers or for a single flag.
+    // value_leaf, value_size and value_signed describe the value in memory for kind VALUE; leaf is
+    // what the whole path ends in.
+    enum Native { NOT_NATIVE, NATIVE_INT, NATIVE_BOOL };
+    Native native = NOT_NATIVE;
+    ReadLeaf value_leaf = LEAF_OTHER;
+    size_t value_size = 0;
+    bool value_signed = false;
+    ReadLeaf leaf = LEAF_OTHER;
+};
+
+// A value as a condition sees it. The text of a string is not owned.
+struct ReadScalar {
+    enum Kind { NIL, INT, FLOAT, BOOL, STRING, OTHER };
+    Kind kind = NIL;
+    int64_t i = 0;
+    double f = 0;
+    bool b = false;
+    const char *s = nullptr;
+    size_t len = 0;
+};
+
+// A condition on a whole number or a flag that lies at a fixed place in an entry, worked out ahead
+// so that checking it takes one read and one comparison.
+struct ReadFast {
+    enum Kind { NONE, COMPARE, SET, TABLE };
+    Kind kind = NONE;
+    bool index = false;                     // the value is the entry's index
+    size_t source = 0;
+    size_t offset = 0;
+    size_t size = 0;
+    bool is_signed = false;
+    unsigned shift = 0;
+    uint64_t mask = 0;                      // 0 when the number read is the value as it stands
+    // TABLE: the answer for every value from first on, and for all values outside the table
+    int64_t first = 0;
+    std::vector<uint8_t> table;
+    bool otherwise = false;
+};
+
+struct ReadCond {
+    enum Kind { CMP, IN, ISNULL, AND, OR, NOT };
+    Kind kind = AND;
+    size_t accessor = 0;
+    int op = LUA_OPEQ;
+    bool swap = false;
+    bool negate = false;
+    std::vector<size_t> kids;
+    // set when both sides are whole numbers, or both are flags
+    bool native = false;
+    // the value compared against
+    ReadScalar::Kind value_kind = ReadScalar::NIL;
+    int64_t native_value = 0;
+    double float_value = 0;
+    std::string text;
+    // the values of an 'in' list, each kind sorted
+    std::vector<int64_t> native_set;
+    std::vector<double> float_set;
+    std::vector<std::string> text_set;
+    bool has_true = false, has_false = false;
+    ReadFast fast;
+};
+
+struct ReadPlan {
+    std::vector<ReadSource> sources;
+    bool named = false;
+    std::vector<ReadAccessor> accessors;
+    std::vector<ReadCond> conds;
+    bool has_where = false;
+    size_t root = 0;
+    bool has_test = false;
+    // the fields to hand back, and the accessor of each
+    std::vector<std::string> names;
+    std::vector<size_t> columns;
+};
+
+// Where a container is at the moment, and how many items it holds.
+struct ReadBound {
+    uint8_t *ptr = nullptr;
+    int outer = 0;
+};
+
+// How far a read has come in one container.
+struct ReadCursor {
+    int outer = 0;
+    int inner = 0;
+    uint8_t *item = nullptr;
+    bool item_ok = false;
+};
+
+bool read_is_struct(const type_identity *type)
+{
+    switch (type->type())
+    {
+    case IDTYPE_STRUCT:
+    case IDTYPE_CLASS:
+    case IDTYPE_UNION:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool read_is_value(const type_identity *type)
+{
+    return type->type() == IDTYPE_PRIMITIVE || type->type() == IDTYPE_ENUM;
+}
+
+const struct_field_info *read_find_field(const struct_identity *type, const std::string &name)
+{
+    for (auto cur = type; cur; cur = cur->getParent())
+    {
+        auto field = cur->getFields();
+        if (!field)
+            continue;
+        for (; field->mode != struct_field_info::END; field++)
+            if (field->name && name == field->name)
+                return field;
+    }
+    return nullptr;
+}
+
+const struct_field_info *read_own_field(const struct_identity *type, const std::string &name)
+{
+    auto field = type->getFields();
+    if (!field)
+        return nullptr;
+    for (; field->mode != struct_field_info::END; field++)
+        if (field->name && name == field->name)
+            return field;
+    return nullptr;
+}
+
+// The classes derived from type that declare a field of this name themselves.
+void read_find_in_subclasses(const struct_identity *type, const std::string &name,
+                             std::vector<const struct_identity*> &found)
+{
+    for (auto child : type->getChildren())
+    {
+        if (read_own_field(child, name))
+            found.push_back(child);
+        else
+            read_find_in_subclasses(child, name, found);
+    }
+}
+
+const struct_identity *read_find_subclass(const struct_identity *type, const std::string &name)
+{
+    for (auto child : type->getChildren())
+    {
+        if (name == child->getName())
+            return child;
+        if (auto deeper = read_find_subclass(child, name))
+            return deeper;
+    }
+    return nullptr;
+}
+
+// Works out what kind of container is at idx, where it is and how much it holds.
+void read_describe_source(lua_State *state, int idx, ReadSource &src)
+{
+    if (lua_type(state, idx) != LUA_TUSERDATA)
+        luaL_error(state, "df.readFields: expected a container, or a table of named containers");
+
+    auto id = get_object_identity(state, idx, "df.readFields()", false, true);
+    // stack: [metatable]
+    if (!id->isContainer() || id->type() == IDTYPE_BIT_CONTAINER)
+        luaL_error(state, "df.readFields: %s is not a container it can read", id->getFullName().c_str());
+
+    src.container = (const container_identity*)id;
+    lua_getfield(state, -1, "_field_identity");
+    src.item = (const type_identity*)lua_touserdata(state, -1);
+    lua_getfield(state, -2, "_count");
+    int fixed = lua_isnil(state, -1) ? -1 : int(lua_tointeger(state, -1));
+    lua_pop(state, 3);
+    if (!src.item)
+        luaL_error(state, "df.readFields: the container's item type is not known");
+
+    src.ptr = (uint8_t*)get_object_ref(state, idx);
+    src.pointers = id->type() == IDTYPE_PTR_CONTAINER || id->type() == IDTYPE_STL_PTR_VECTOR;
+    src.dynamic = fixed < 0;
+    src.outer = src.dynamic ? src.container->raw_item_count(src.ptr) : fixed;
+    src.leaf = src.item;
+    if (!src.pointers)
+    {
+        while (src.leaf->type() == IDTYPE_BUFFER)
+        {
+            auto buffer = (const df::buffer_container_identity*)src.leaf;
+            if (!buffer->getItemType() || buffer->getSize() <= 0)
+                luaL_error(state, "df.readFields: cannot read a nested array of unknown shape");
+            src.inner *= buffer->getSize();
+            src.leaf = buffer->getItemType();
+        }
+    }
+    src.leaf_size = src.leaf->byte_size();
+    if (!src.pointers && src.leaf->type() == IDTYPE_POINTER)
+    {
+        auto target = ((const pointer_identity_base*)src.leaf)->getTarget();
+        if (!target)
+            luaL_error(state, "df.readFields: cannot read a container of untyped pointers");
+        src.leaf_pointers = true;
+        src.leaf = target;
+    }
+}
+
+void read_add_source(lua_State *state, ReadPlan &plan, int idx, const std::string &name)
+{
+    ReadSource src;
+    src.name = name;
+    read_describe_source(state, idx, src);
+    plan.sources.push_back(src);
+}
+
+bool read_same_kind(const ReadSource &a, const ReadSource &b)
+{
+    return a.container == b.container && a.item == b.item && a.leaf == b.leaf && a.leaf_size == b.leaf_size &&
+           a.inner == b.inner && a.dynamic == b.dynamic && a.pointers == b.pointers &&
+           a.leaf_pointers == b.leaf_pointers && (a.dynamic || a.outer == b.outer);
+}
+
+// Points a read at the containers at idx, which must be of the kinds it was set up for: one
+// container, or a table of named ones. Returns how many entries they hold.
+lua_Integer read_bind(lua_State *state, const ReadPlan &plan, int idx, std::vector<ReadBound> &bound)
+{
+    if (plan.named && !lua_istable(state, idx))
+        luaL_error(state, "df.readFields: expected a table of named containers");
+    lua_Integer total = 0;
+    for (size_t i = 0; i < plan.sources.size(); i++)
+    {
+        const ReadSource &want = plan.sources[i];
+        if (plan.named)
+        {
+            lua_pushlstring(state, want.name.data(), want.name.size());
+            lua_rawget(state, idx);
+            if (lua_isnil(state, -1))
+                luaL_error(state, "df.readFields: no container named '%s'", want.name.c_str());
+        }
+        else
+            lua_pushvalue(state, idx);
+        ReadSource now;
+        read_describe_source(state, lua_gettop(state), now);
+        lua_pop(state, 1);
+        if (!read_same_kind(want, now))
+            luaL_error(state, "df.readFields: a container is not of the kind this read was set up for");
+        bound[i].ptr = now.ptr;
+        bound[i].outer = now.outer;
+        lua_Integer count = lua_Integer(now.outer) * now.inner;
+        if (i == 0)
+            total = count;
+        else if (count != total)
+            luaL_error(state, "df.readFields: the containers do not have the same number of entries");
+    }
+    return total;
+}
+
+// The size in bytes of a value that Lua reads as an integer, or 0 for anything else. Whether it is
+// signed is found by reading all ones through the type's own reader.
+size_t read_integer_size(lua_State *state, const type_identity *type, bool &is_signed)
+{
+    if (type && type->type() == IDTYPE_ENUM)
+        type = ((const enum_identity*)type)->getBaseType();
+    auto number = type ? dynamic_cast<const df::number_identity_base*>(type) : nullptr;
+    if (!number || !number->isInteger())
+        return 0;
+    size_t size = number->byte_size();
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+        return 0;
+    uint8_t ones[8];
+    memset(ones, 0xFF, sizeof(ones));
+    number->lua_read(state, 0, ones);
+    bool integer = lua_isinteger(state, -1) != 0;
+    is_signed = integer && lua_tointeger(state, -1) < 0;
+    lua_pop(state, 1);
+    return integer ? size : 0;
+}
+
+ReadLeaf read_classify(lua_State *state, const type_identity *type, size_t &size, bool &is_signed)
+{
+    size = 0;
+    is_signed = false;
+    if (type == (const type_identity*)df::identity_traits<bool>::get())
+        return LEAF_BOOL;
+    if (type == (const type_identity*)df::identity_traits<float>::get())
+        return LEAF_FLOAT;
+    if (type == (const type_identity*)df::identity_traits<double>::get())
+        return LEAF_DOUBLE;
+    if (type == (const type_identity*)df::identity_traits<std::string>::get())
+        return LEAF_STRING;
+    if (type == (const type_identity*)df::identity_traits<char*>::get() ||
+        type == (const type_identity*)df::identity_traits<const char*>::get())
+        return LEAF_CSTRING;
+    size = read_integer_size(state, type, is_signed);
+    if (size)
+        return LEAF_INT;
+    return LEAF_OTHER;
+}
+
+// for_cond allows a path to end at a pointer, for a condition that asks whether it is null.
+size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, bool for_cond = false)
+{
+    ReadAccessor acc;
+    if (path == "_index")
+    {
+        acc.kind = ReadAccessor::INDEX;
+        acc.native = ReadAccessor::NATIVE_INT;
+        acc.leaf = LEAF_INT;
+        plan.accessors.push_back(acc);
+        return plan.accessors.size() - 1;
+    }
+
+    if (path == "_from")
+    {
+        if (for_cond)
+            luaL_error(state, "df.readFields: '_from' cannot be used in a condition");
+        acc.kind = ReadAccessor::FROM;
+        plan.accessors.push_back(acc);
+        return plan.accessors.size() - 1;
+    }
+
+    std::vector<std::string> parts;
+    split_string(&parts, path, ".");
+    if (parts.empty() || parts[0].empty())
+        luaL_error(state, "df.readFields: empty field name");
+
+    size_t at = 0;
+    if (plan.named)
+    {
+        bool found = false;
+        for (size_t i = 0; i < plan.sources.size(); i++)
+        {
+            if (plan.sources[i].name == parts[0])
+            {
+                acc.source = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            luaL_error(state, "df.readFields: '%s' does not start with the name of a container", path.c_str());
+        at = 1;
+    }
+    else if (parts[0] == "_value")
+        at = 1;
+
+    acc.offsets.push_back(0);
+    const type_identity *cur = plan.sources[acc.source].leaf;
+    const enum_identity *owner = nullptr;
+    bool done = false;
+    if (read_is_value(cur))
+    {
+        acc.type = cur;
+        done = true;
+        owner = cur->type() == IDTYPE_ENUM ? (const enum_identity*)cur : nullptr;
+    }
+
+    for (; at < parts.size(); at++)
+    {
+        const std::string &part = parts[at];
+        if (done)
+        {
+            // a step past a value looks the value up in its enum's attributes
+            if (!owner || !owner->getAttrs() || !owner->getAttrType())
+                luaL_error(state, "df.readFields: '%s' in '%s' follows a value that has no attributes",
+                           part.c_str(), path.c_str());
+            auto field = read_find_field(owner->getAttrType(), part);
+            if (!field || field->mode != struct_field_info::PRIMITIVE || !field->type || !read_is_value(field->type))
+                luaL_error(state, "df.readFields: no readable attribute '%s' in '%s'", part.c_str(), path.c_str());
+            acc.attrs.push_back(ReadAttr{owner, field, 0, false});
+            owner = field->type->type() == IDTYPE_ENUM ? (const enum_identity*)field->type : nullptr;
+            continue;
+        }
+
+        if (read_is_struct(cur))
+        {
+            auto owner_type = (const struct_identity*)cur;
+            std::string field_name = part;
+            const struct_identity *narrowed = nullptr;
+            size_t colon = part.find(':');
+            if (colon != std::string::npos)
+            {
+                // Class:field reads a field of a class derived from the declared one
+                field_name = part.substr(colon + 1);
+                if (cur->type() == IDTYPE_CLASS)
+                    narrowed = read_find_subclass(owner_type, part.substr(0, colon));
+                if (!narrowed)
+                    luaL_error(state, "df.readFields: '%s' in '%s' does not name a class derived from %s",
+                               part.substr(0, colon).c_str(), path.c_str(), cur->getFullName().c_str());
+            }
+            auto field = read_find_field(narrowed ? narrowed : owner_type, field_name);
+            if (!field && !narrowed && cur->type() == IDTYPE_CLASS)
+            {
+                std::vector<const struct_identity*> found;
+                read_find_in_subclasses(owner_type, field_name, found);
+                if (found.size() > 1)
+                    luaL_error(state, "df.readFields: several classes derived from %s have a field '%s'; "
+                                      "write it as Class:%s in '%s'", cur->getFullName().c_str(),
+                               field_name.c_str(), field_name.c_str(), path.c_str());
+                if (found.size() == 1)
+                {
+                    narrowed = found[0];
+                    field = read_own_field(narrowed, field_name);
+                }
+            }
+            if (!field)
+                luaL_error(state, "df.readFields: no field '%s' in %s (path '%s')", field_name.c_str(),
+                           cur->getFullName().c_str(), path.c_str());
+            if (narrowed)
+            {
+                if (narrowed->type() != IDTYPE_CLASS)
+                    luaL_error(state, "df.readFields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
+                acc.checks.push_back(ReadCheck{acc.offsets.size() - 1, acc.offsets.back(),
+                                               (const virtual_identity*)narrowed});
+            }
+            switch (field->mode)
+            {
+            case struct_field_info::PRIMITIVE:
+            case struct_field_info::SUBSTRUCT:
+                if (!field->type)
+                    luaL_error(state, "df.readFields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
+                acc.offsets.back() += field->offset;
+                cur = field->type;
+                break;
+            case struct_field_info::POINTER:
+                if (for_cond && at + 1 == parts.size())
+                {
+                    acc.offsets.back() += field->offset;
+                    acc.kind = ReadAccessor::PTR;
+                    done = true;
+                    break;
+                }
+                if (!field->type || (field->count & (PTRFLAG_IS_ARRAY | PTRFLAG_HAS_BAD_POINTERS)))
+                    luaL_error(state, "df.readFields: cannot follow the pointer '%s' in '%s'", part.c_str(), path.c_str());
+                acc.offsets.back() += field->offset;
+                acc.offsets.push_back(0);
+                cur = field->type;
+                break;
+            default:
+                luaL_error(state, "df.readFields: '%s' in '%s' is not a single value or a structure",
+                           part.c_str(), path.c_str());
+            }
+            if (acc.kind == ReadAccessor::PTR)
+                owner = nullptr;
+            else if (read_is_value(cur))
+            {
+                acc.type = cur;
+                done = true;
+                owner = cur->type() == IDTYPE_ENUM ? (const enum_identity*)cur : nullptr;
+            }
+        }
+        else if (cur->type() == IDTYPE_BITFIELD)
+        {
+            auto bits = (const bitfield_identity*)cur;
+            if (part == "whole")
+            {
+                acc.kind = ReadAccessor::WHOLE;
+                acc.whole_size = bits->byte_size();
+            }
+            else
+            {
+                unsigned bit = 0;
+                if (!findBitfieldField(&bit, part, bits->getNumBits(), bits->getBits()))
+                    luaL_error(state, "df.readFields: no flag '%s' in '%s'", part.c_str(), path.c_str());
+                acc.kind = ReadAccessor::BIT;
+                acc.bit = bit;
+                acc.bit_size = std::max(1, bits->getBits()[bit].size);
+            }
+            done = true;
+            owner = nullptr;
+        }
+        else
+            luaL_error(state, "df.readFields: '%s' in '%s' follows something that has no fields",
+                       part.c_str(), path.c_str());
+    }
+
+    if (!done)
+    {
+        if (cur->type() != IDTYPE_BITFIELD)
+            luaL_error(state, "df.readFields: '%s' is not a single value; name one of its fields", path.c_str());
+        acc.kind = ReadAccessor::WHOLE;
+        acc.whole_size = cur->byte_size();
+    }
+
+    // How the value lies in memory. Conditions on integers and flags are the common case and take
+    // a shorter way.
+    bool attrs_native = true;
+    for (ReadAttr &attr : acc.attrs)
+    {
+        attr.leaf = read_classify(state, attr.field->type, attr.size, attr.is_signed);
+        if (attr.leaf != LEAF_INT)
+            attrs_native = false;
+    }
+    if (acc.kind == ReadAccessor::VALUE)
+        acc.value_leaf = read_classify(state, acc.type, acc.value_size, acc.value_signed);
+    if (!acc.attrs.empty())
+        acc.leaf = acc.attrs.back().leaf;
+    else if (acc.kind == ReadAccessor::VALUE)
+        acc.leaf = acc.value_leaf;
+    else if (acc.kind == ReadAccessor::PTR)
+        acc.leaf = LEAF_OTHER;
+    else
+        acc.leaf = acc.kind == ReadAccessor::BIT && acc.bit_size <= 1 ? LEAF_BOOL : LEAF_INT;
+    if (acc.kind == ReadAccessor::PTR || !attrs_native ||
+        (acc.kind == ReadAccessor::VALUE && acc.value_leaf != LEAF_INT))
+        acc.native = ReadAccessor::NOT_NATIVE;
+    else if (acc.kind == ReadAccessor::BIT && acc.bit_size <= 1)
+        acc.native = ReadAccessor::NATIVE_BOOL;
+    else
+        acc.native = ReadAccessor::NATIVE_INT;
+
+    plan.accessors.push_back(acc);
+    return plan.accessors.size() - 1;
+}
+
+int64_t read_integer_at(const uint8_t *ptr, size_t size, bool is_signed)
+{
+    switch (size)
+    {
+    case 1: return is_signed ? int64_t(*(const int8_t*)ptr) : int64_t(*ptr);
+    case 2: { uint16_t v; memcpy(&v, ptr, 2); return is_signed ? int64_t(int16_t(v)) : int64_t(v); }
+    case 4: { uint32_t v; memcpy(&v, ptr, 4); return is_signed ? int64_t(int32_t(v)) : int64_t(v); }
+    default: { int64_t v; memcpy(&v, ptr, 8); return v; }
+    }
+}
+
+// Where the path ends in memory, or null when a null pointer or an object of another class is in
+// the way.
+uint8_t *read_reach(const ReadAccessor &acc, const std::vector<uint8_t*> &bases)
+{
+    uint8_t *ptr = bases[acc.source];
+    size_t check = 0;
+    for (size_t i = 0; i < acc.offsets.size(); i++)
+    {
+        if (i > 0)
+            ptr = *(uint8_t**)ptr;
+        if (!ptr)
+            return nullptr;
+        for (; check < acc.checks.size() && acc.checks[check].segment == i; check++)
+            if (!acc.checks[check].cls->is_instance(virtual_ptr(ptr + acc.checks[check].offset)))
+                return nullptr;
+        ptr += acc.offsets[i];
+    }
+    return ptr;
+}
+
+// The row of an enum's attribute table that belongs to a value; out-of-range values read the
+// default row, as enum.attrs[] does.
+const uint8_t *read_attr_row(const ReadAttr &attr, int64_t idx)
+{
+    if (auto complex = attr.owner->getComplex())
+    {
+        auto it = complex->value_index_map.find(idx);
+        if (it != complex->value_index_map.end())
+            idx = int64_t(it->second);
+        else
+            idx = attr.owner->getLastItem() + 1;
+    }
+    else
+    {
+        if (idx < attr.owner->getFirstItem() || idx > attr.owner->getLastItem())
+            idx = attr.owner->getLastItem() + 1;
+        idx -= attr.owner->getFirstItem();
+    }
+    return (const uint8_t*)attr.owner->getAttrs() + attr.owner->getAttrType()->byte_size() * size_t(idx);
+}
+
+void read_scalar_at(const uint8_t *ptr, ReadLeaf leaf, size_t size, bool is_signed, ReadScalar &out)
+{
+    switch (leaf)
+    {
+    case LEAF_INT:
+        out.kind = ReadScalar::INT;
+        out.i = read_integer_at(ptr, size, is_signed);
+        break;
+    case LEAF_BOOL:
+        out.kind = ReadScalar::BOOL;
+        out.b = *(const bool*)ptr;
+        break;
+    case LEAF_FLOAT:
+    {
+        float v;
+        memcpy(&v, ptr, sizeof(v));
+        out.kind = ReadScalar::FLOAT;
+        out.f = double(v);
+        break;
+    }
+    case LEAF_DOUBLE:
+        out.kind = ReadScalar::FLOAT;
+        memcpy(&out.f, ptr, sizeof(out.f));
+        break;
+    case LEAF_STRING:
+    {
+        auto text = (const std::string*)ptr;
+        out.kind = ReadScalar::STRING;
+        out.s = text->c_str();
+        out.len = text->size();
+        break;
+    }
+    case LEAF_CSTRING:
+    {
+        const char *text = *(const char* const*)ptr;
+        out.kind = text ? ReadScalar::STRING : ReadScalar::NIL;
+        out.s = text;
+        out.len = text ? strlen(text) : 0;
+        break;
+    }
+    default:
+        out.kind = ReadScalar::OTHER;
+    }
+}
+
+// The value at the end of a path, for a condition. Returns false when it could not be reached.
+bool read_scalar(const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index, ReadScalar &out)
+{
+    if (acc.kind == ReadAccessor::INDEX)
+    {
+        out.kind = ReadScalar::INT;
+        out.i = index;
+        return true;
+    }
+    const uint8_t *ptr = read_reach(acc, bases);
+    if (!ptr)
+        return false;
+
+    switch (acc.kind)
+    {
+    case ReadAccessor::BIT:
+    {
+        int value = getBitfieldField(ptr, acc.bit, unsigned(acc.bit_size));
+        if (acc.bit_size <= 1)
+        {
+            out.kind = ReadScalar::BOOL;
+            out.b = value != 0;
+        }
+        else
+        {
+            out.kind = ReadScalar::INT;
+            out.i = value;
+        }
+        break;
+    }
+    case ReadAccessor::WHOLE:
+    {
+        size_t whole = 0;
+        memcpy(&whole, ptr, std::min(sizeof(whole), acc.whole_size));
+        out.kind = ReadScalar::INT;
+        out.i = int64_t(lua_Integer(whole));
+        break;
+    }
+    case ReadAccessor::VALUE:
+        read_scalar_at(ptr, acc.value_leaf, acc.value_size, acc.value_signed, out);
+        break;
+    default:
+        return false;
+    }
+
+    for (const ReadAttr &attr : acc.attrs)
+    {
+        if (out.kind != ReadScalar::INT)
+            return false;
+        read_scalar_at(read_attr_row(attr, out.i) + attr.field->offset, attr.leaf, attr.size, attr.is_signed, out);
+    }
+    return true;
+}
+
+// Compares a whole number with a floating-point one exactly: -1, 0 or 1, or 2 when the float is
+// not a number.
+int read_cmp_int_float(int64_t i, double f)
+{
+    if (f != f)
+        return 2;
+    if (f >= 9223372036854775808.0)
+        return -1;
+    if (f < -9223372036854775808.0)
+        return 1;
+    double whole = std::floor(f);
+    int64_t fi = int64_t(whole);
+    if (i < fi)
+        return -1;
+    if (i > fi)
+        return 1;
+    return f > whole ? -1 : 0;
+}
+
+// Orders two strings the way Lua does: by the current locale, a chunk at a time where they hold
+// zero bytes. Both must end in a zero byte.
+int read_cmp_text(const char *l, size_t ll, const char *r, size_t lr)
+{
+    for (;;)
+    {
+        int order = strcoll(l, r);
+        if (order != 0)
+            return order;
+        size_t len = strlen(l);
+        if (len == lr)
+            return len == ll ? 0 : 1;
+        if (len == ll)
+            return -1;
+        len++;
+        l += len; ll -= len;
+        r += len; lr -= len;
+    }
+}
+
+// Equality as Lua's rawequal has it: numbers by value whatever their kind, other values only
+// against their own kind.
+bool read_equal(const ReadScalar &a, const ReadScalar &b)
+{
+    switch (a.kind)
+    {
+    case ReadScalar::INT:
+        if (b.kind == ReadScalar::INT)
+            return a.i == b.i;
+        return b.kind == ReadScalar::FLOAT && read_cmp_int_float(a.i, b.f) == 0;
+    case ReadScalar::FLOAT:
+        if (b.kind == ReadScalar::FLOAT)
+            return a.f == b.f;
+        return b.kind == ReadScalar::INT && read_cmp_int_float(b.i, a.f) == 0;
+    case ReadScalar::BOOL:
+        return b.kind == ReadScalar::BOOL && a.b == b.b;
+    case ReadScalar::STRING:
+        return b.kind == ReadScalar::STRING && a.len == b.len && memcmp(a.s, b.s, a.len) == 0;
+    default:
+        return false;
+    }
+}
+
+// a < b, or a <= b. Values of different kinds are never in order; numbers of either kind are.
+bool read_less(const ReadScalar &a, const ReadScalar &b, bool or_equal)
+{
+    int order;
+    if (a.kind == ReadScalar::INT && b.kind == ReadScalar::INT)
+        order = a.i < b.i ? -1 : a.i > b.i ? 1 : 0;
+    else if (a.kind == ReadScalar::INT && b.kind == ReadScalar::FLOAT)
+        order = read_cmp_int_float(a.i, b.f);
+    else if (a.kind == ReadScalar::FLOAT && b.kind == ReadScalar::INT)
+    {
+        order = read_cmp_int_float(b.i, a.f);
+        if (order != 2)
+            order = -order;
+    }
+    else if (a.kind == ReadScalar::FLOAT && b.kind == ReadScalar::FLOAT)
+        return or_equal ? a.f <= b.f : a.f < b.f;
+    else if (a.kind == ReadScalar::STRING && b.kind == ReadScalar::STRING)
+        order = read_cmp_text(a.s, a.len, b.s, b.len);
+    else
+        return false;
+    return order == 2 ? false : or_equal ? order <= 0 : order < 0;
+}
+
+// The value of a Lua number or string, as a condition compares against it.
+void read_scalar_from_lua(lua_State *state, int idx, ReadScalar &out)
+{
+    switch (lua_type(state, idx))
+    {
+    case LUA_TNUMBER:
+        if (lua_isinteger(state, idx))
+        {
+            out.kind = ReadScalar::INT;
+            out.i = lua_tointeger(state, idx);
+        }
+        else
+        {
+            out.kind = ReadScalar::FLOAT;
+            out.f = lua_tonumber(state, idx);
+        }
+        break;
+    case LUA_TBOOLEAN:
+        out.kind = ReadScalar::BOOL;
+        out.b = lua_toboolean(state, idx) != 0;
+        break;
+    case LUA_TSTRING:
+        out.kind = ReadScalar::STRING;
+        out.s = lua_tolstring(state, idx, &out.len);
+        break;
+    default:
+        out.kind = ReadScalar::OTHER;
+    }
+}
+
+// Whether a float is a whole number that fits an integer, which is how Lua files it as a table key.
+bool read_float_is_int(double f, int64_t &i)
+{
+    if (!(f >= -9223372036854775808.0 && f < 9223372036854775808.0) || std::floor(f) != f)
+        return false;
+    i = int64_t(f);
+    return true;
+}
+
+// A whole number against the value of a condition whose native flag is set.
+inline bool read_compare(const ReadCond &cond, int64_t value)
+{
+    if (cond.op == LUA_OPEQ)
+        return (value == cond.native_value) != cond.negate;
+    if (cond.op == LUA_OPLT)
+        return cond.swap ? cond.native_value < value : value < cond.native_value;
+    return cond.swap ? cond.native_value <= value : value <= cond.native_value;
+}
+
+// Sets up the short way for a condition, when its value is a whole number or a flag held in the
+// entry itself. What the general way would answer is unchanged.
+void read_make_fast(const ReadPlan &plan, ReadCond &cond)
+{
+    const size_t table_limit = 4096;
+    if ((cond.kind != ReadCond::CMP && cond.kind != ReadCond::IN) || !cond.native)
+        return;
+    const ReadAccessor &acc = plan.accessors[cond.accessor];
+    if (!acc.checks.empty())
+        return;
+
+    ReadFast fast;
+    fast.source = acc.source;
+    if (acc.kind == ReadAccessor::INDEX)
+        fast.index = true;
+    else
+    {
+        if (acc.offsets.size() != 1)
+            return;
+        fast.offset = acc.offsets[0];
+        if (acc.kind == ReadAccessor::VALUE)
+        {
+            fast.size = acc.value_size;
+            fast.is_signed = acc.value_signed;
+        }
+        else if (acc.kind == ReadAccessor::BIT)
+        {
+            // the same bytes getBitfieldField reads
+            unsigned size = unsigned(acc.bit_size);
+            unsigned shift = acc.bit % 8;
+            if (size + shift > 31)
+                return;
+            uint32_t mask = ((uint32_t(1) << size) - 1) << shift;
+            fast.offset += acc.bit / 8;
+            fast.size = !(mask & ~0xFFU) ? 1 : !(mask & ~0xFFFFU) ? 2 : 4;
+            fast.shift = shift;
+            fast.mask = (uint64_t(1) << size) - 1;
+        }
+        else if (acc.kind == ReadAccessor::WHOLE)
+        {
+            if (acc.whole_size != 1 && acc.whole_size != 2 && acc.whole_size != 4 && acc.whole_size != 8)
+                return;
+            fast.size = acc.whole_size;
+        }
+        else
+            return;
+    }
+
+    if (!acc.attrs.empty())
+    {
+        // an attribute of an enum value: work the answer out for every value the enum has
+        for (const ReadAttr &attr : acc.attrs)
+            if (attr.owner->getComplex())
+                return;
+        int64_t first = acc.attrs[0].owner->getFirstItem(), last = acc.attrs[0].owner->getLastItem();
+        if (last < first || uint64_t(last - first) >= table_limit)
+            return;
+        auto passes = [&acc, &cond](int64_t value) {
+            for (const ReadAttr &attr : acc.attrs)
+                value = read_integer_at(read_attr_row(attr, value) + attr.field->offset, attr.size, attr.is_signed);
+            if (cond.kind == ReadCond::IN)
+                return std::binary_search(cond.native_set.begin(), cond.native_set.end(), value);
+            return read_compare(cond, value);
+        };
+        fast.first = first;
+        fast.table.resize(size_t(last - first) + 1);
+        for (int64_t value = first; value <= last; value++)
+            fast.table[size_t(value - first)] = passes(value);
+        fast.otherwise = passes(last + 1);
+        fast.kind = ReadFast::TABLE;
+    }
+    else if (cond.kind == ReadCond::IN)
+    {
+        const std::vector<int64_t> &set = cond.native_set;
+        if (set.empty())
+            fast.kind = ReadFast::TABLE;
+        else if (uint64_t(set.back()) - uint64_t(set.front()) < table_limit)
+        {
+            fast.first = set.front();
+            fast.table.resize(size_t(uint64_t(set.back()) - uint64_t(set.front())) + 1);
+            for (int64_t value : set)
+                fast.table[size_t(uint64_t(value) - uint64_t(set.front()))] = 1;
+            fast.kind = ReadFast::TABLE;
+        }
+        else
+            fast.kind = ReadFast::SET;
+    }
+    else
+        fast.kind = ReadFast::COMPARE;
+    cond.fast = std::move(fast);
+}
+
+// The value read_push would push, for an accessor that is NATIVE_INT or NATIVE_BOOL. Returns false
+// where read_push would: when the value could not be reached.
+bool read_native(const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index, int64_t &value)
+{
+    if (acc.kind == ReadAccessor::INDEX)
+    {
+        value = index;
+        return true;
+    }
+
+    const uint8_t *ptr = read_reach(acc, bases);
+    if (!ptr)
+        return false;
+
+    switch (acc.kind)
+    {
+    case ReadAccessor::BIT:
+        value = getBitfieldField(ptr, acc.bit, unsigned(acc.bit_size));
+        if (acc.bit_size <= 1)
+            value = value != 0;
+        break;
+    case ReadAccessor::WHOLE:
+    {
+        size_t whole = 0;
+        memcpy(&whole, ptr, std::min(sizeof(whole), acc.whole_size));
+        value = int64_t(lua_Integer(whole));
+        break;
+    }
+    default:
+        value = read_integer_at(ptr, acc.value_size, acc.value_signed);
+    }
+
+    for (const ReadAttr &attr : acc.attrs)
+        value = read_integer_at(read_attr_row(attr, value) + attr.field->offset, attr.size, attr.is_signed);
+    return true;
+}
+
+// Pushes exactly one value. Returns false, having pushed nil, when the value could not be reached.
+bool read_push(lua_State *state, const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index)
+{
+    if (acc.kind == ReadAccessor::INDEX)
+    {
+        lua_pushinteger(state, index);
+        return true;
+    }
+
+    uint8_t *ptr = bases[acc.source];
+    size_t check = 0;
+    for (size_t i = 0; i < acc.offsets.size(); i++)
+    {
+        if (i > 0)
+            ptr = *(uint8_t**)ptr;
+        if (!ptr)
+        {
+            lua_pushnil(state);
+            return false;
+        }
+        for (; check < acc.checks.size() && acc.checks[check].segment == i; check++)
+        {
+            if (!acc.checks[check].cls->is_instance(virtual_ptr(ptr + acc.checks[check].offset)))
+            {
+                lua_pushnil(state);
+                return false;
+            }
+        }
+        ptr += acc.offsets[i];
+    }
+
+    switch (acc.kind)
+    {
+    case ReadAccessor::BIT:
+    {
+        int value = getBitfieldField(ptr, acc.bit, unsigned(acc.bit_size));
+        if (acc.bit_size <= 1)
+            lua_pushboolean(state, value != 0);
+        else
+            lua_pushinteger(state, value);
+        break;
+    }
+    case ReadAccessor::WHOLE:
+    {
+        size_t value = 0;
+        memcpy(&value, ptr, std::min(sizeof(value), acc.whole_size));
+        lua_pushinteger(state, lua_Integer(value));
+        break;
+    }
+    default:
+        acc.type->lua_read(state, 0, ptr);
+    }
+
+    for (const ReadAttr &attr : acc.attrs)
+    {
+        if (!lua_isinteger(state, -1))
+        {
+            lua_pop(state, 1);
+            lua_pushnil(state);
+            return false;
+        }
+        int64_t idx = lua_tointeger(state, -1);
+        lua_pop(state, 1);
+
+        // out-of-range values read the default entry, as enum.attrs[] does
+        if (auto complex = attr.owner->getComplex())
+        {
+            auto it = complex->value_index_map.find(idx);
+            if (it != complex->value_index_map.end())
+                idx = int64_t(it->second);
+            else
+                idx = attr.owner->getLastItem() + 1;
+        }
+        else
+        {
+            if (idx < attr.owner->getFirstItem() || idx > attr.owner->getLastItem())
+                idx = attr.owner->getLastItem() + 1;
+            idx -= attr.owner->getFirstItem();
+        }
+
+        auto row = (uint8_t*)attr.owner->getAttrs() + attr.owner->getAttrType()->byte_size() * size_t(idx);
+        attr.field->type->lua_read(state, 0, row + attr.field->offset);
+    }
+    return true;
+}
+
+size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
+{
+    if (depth > 32)
+        luaL_error(state, "df.readFields: conditions are nested too deeply");
+    luaL_checkstack(state, 10, "df.readFields: conditions are nested too deeply");
+    if (!lua_istable(state, idx))
+        luaL_error(state, "df.readFields: each condition must be a table");
+
+    ReadCond cond;
+    lua_rawgeti(state, idx, 1);
+    lua_rawgeti(state, idx, 2);
+    // stack: [head, second]
+    if (lua_type(state, -2) != LUA_TSTRING)
+        luaL_error(state, "df.readFields: a condition must start with a field name, 'and', 'or' or 'not'");
+    std::string head = lua_tostring(state, -2);
+
+    if ((lua_istable(state, -1) && (head == "and" || head == "or" || head == "not")) ||
+        (lua_isnil(state, -1) && (head == "and" || head == "or")))
+    {
+        cond.kind = head == "and" ? ReadCond::AND : head == "or" ? ReadCond::OR : ReadCond::NOT;
+        int count = int(lua_rawlen(state, idx));
+        if (cond.kind == ReadCond::NOT && count != 2)
+            luaL_error(state, "df.readFields: 'not' takes exactly one condition");
+        for (int i = 2; i <= count; i++)
+        {
+            lua_rawgeti(state, idx, i);
+            cond.kids.push_back(read_parse_cond(state, plan, lua_gettop(state), depth + 1));
+            lua_pop(state, 1);
+        }
+        lua_pop(state, 2);
+    }
+    else
+    {
+        if (lua_type(state, -1) != LUA_TSTRING)
+            luaL_error(state, "df.readFields: the condition on '%s' has no comparison", head.c_str());
+        std::string op = lua_tostring(state, -1);
+        lua_pop(state, 2);
+
+        cond.kind = ReadCond::CMP;
+        bool ordered = true;
+        if (op == "==")
+            ordered = false;
+        else if (op == "~=")
+        {
+            ordered = false;
+            cond.negate = true;
+        }
+        else if (op == "<")
+            cond.op = LUA_OPLT;
+        else if (op == "<=")
+            cond.op = LUA_OPLE;
+        else if (op == ">")
+        {
+            cond.op = LUA_OPLT;
+            cond.swap = true;
+        }
+        else if (op == ">=")
+        {
+            cond.op = LUA_OPLE;
+            cond.swap = true;
+        }
+        else if (op == "in")
+        {
+            ordered = false;
+            cond.kind = ReadCond::IN;
+        }
+        else
+            luaL_error(state, "df.readFields: unknown comparison '%s' on '%s'", op.c_str(), head.c_str());
+
+        cond.accessor = read_compile(state, plan, head, true);
+        const ReadAccessor &acc = plan.accessors[cond.accessor];
+
+        lua_rawgeti(state, idx, 3);
+        // stack: [value]
+        if (acc.kind == ReadAccessor::PTR)
+        {
+            if (cond.kind != ReadCond::CMP || ordered || lua_type(state, -1) != LUA_TLIGHTUSERDATA ||
+                lua_touserdata(state, -1) != nullptr)
+                luaL_error(state, "df.readFields: '%s' is a pointer, which can only be compared with df.NULL "
+                                  "using == or ~=", head.c_str());
+            cond.kind = ReadCond::ISNULL;
+        }
+        else if (acc.leaf == LEAF_OTHER)
+            luaL_error(state, "df.readFields: '%s' holds a kind of value that conditions cannot compare", head.c_str());
+        else if (cond.kind == ReadCond::IN)
+        {
+            if (!lua_istable(state, -1))
+                luaL_error(state, "df.readFields: 'in' on '%s' needs a list of values", head.c_str());
+            int count = int(lua_rawlen(state, -1));
+            for (int i = 1; i <= count; i++)
+            {
+                lua_rawgeti(state, -1, i);
+                ReadScalar item;
+                read_scalar_from_lua(state, -1, item);
+                int64_t whole;
+                if (item.kind == ReadScalar::INT)
+                    cond.native_set.push_back(item.i);
+                else if (item.kind == ReadScalar::FLOAT && read_float_is_int(item.f, whole))
+                    cond.native_set.push_back(whole);
+                else if (item.kind == ReadScalar::FLOAT && item.f == item.f)
+                    cond.float_set.push_back(item.f);
+                else if (item.kind == ReadScalar::BOOL)
+                    (item.b ? cond.has_true : cond.has_false) = true;
+                else if (item.kind == ReadScalar::STRING)
+                    cond.text_set.emplace_back(item.s, item.len);
+                lua_pop(state, 1);
+            }
+            std::sort(cond.native_set.begin(), cond.native_set.end());
+            std::sort(cond.float_set.begin(), cond.float_set.end());
+            std::sort(cond.text_set.begin(), cond.text_set.end());
+            cond.native = acc.native == ReadAccessor::NATIVE_INT;
+        }
+        else
+        {
+            if (ordered ? !(lua_type(state, -1) == LUA_TNUMBER || lua_type(state, -1) == LUA_TSTRING)
+                        : lua_isnil(state, -1))
+                luaL_error(state, "df.readFields: the condition on '%s' has no usable value", head.c_str());
+            ReadScalar value;
+            read_scalar_from_lua(state, -1, value);
+            cond.value_kind = value.kind;
+            cond.native_value = value.kind == ReadScalar::BOOL ? int64_t(value.b) : value.i;
+            cond.float_value = value.f;
+            if (value.kind == ReadScalar::STRING)
+                cond.text.assign(value.s, value.len);
+            // whole numbers against whole numbers, and flags against true or false, take a shorter way
+            cond.native = (acc.native == ReadAccessor::NATIVE_INT && value.kind == ReadScalar::INT) ||
+                          (acc.native == ReadAccessor::NATIVE_BOOL && value.kind == ReadScalar::BOOL && !ordered);
+        }
+        lua_pop(state, 1);
+    }
+
+    read_make_fast(plan, cond);
+    plan.conds.push_back(cond);
+    return plan.conds.size() - 1;
+}
+
+bool read_test(const ReadPlan &plan, size_t node, const std::vector<uint8_t*> &bases, lua_Integer index)
+{
+    const ReadCond &cond = plan.conds[node];
+    if (cond.fast.kind != ReadFast::NONE)
+    {
+        const ReadFast &fast = cond.fast;
+        int64_t value = index;
+        if (!fast.index)
+        {
+            value = read_integer_at(bases[fast.source] + fast.offset, fast.size, fast.is_signed);
+            if (fast.mask)
+                value = int64_t((uint64_t(value) >> fast.shift) & fast.mask);
+        }
+        if (fast.kind == ReadFast::COMPARE)
+            return read_compare(cond, value);
+        if (fast.kind == ReadFast::SET)
+            return std::binary_search(cond.native_set.begin(), cond.native_set.end(), value);
+        uint64_t at = uint64_t(value) - uint64_t(fast.first);
+        return at < fast.table.size() ? fast.table[size_t(at)] != 0 : fast.otherwise;
+    }
+    switch (cond.kind)
+    {
+    case ReadCond::AND:
+        for (size_t kid : cond.kids)
+            if (!read_test(plan, kid, bases, index))
+                return false;
+        return true;
+    case ReadCond::OR:
+        for (size_t kid : cond.kids)
+            if (read_test(plan, kid, bases, index))
+                return true;
+        return false;
+    case ReadCond::NOT:
+        return !read_test(plan, cond.kids[0], bases, index);
+    case ReadCond::ISNULL:
+    {
+        // false either way when the pointer itself cannot be reached
+        const uint8_t *ptr = read_reach(plan.accessors[cond.accessor], bases);
+        return ptr && (*(void* const*)ptr == nullptr) != cond.negate;
+    }
+    case ReadCond::IN:
+    {
+        if (cond.native)
+        {
+            int64_t value;
+            return read_native(plan.accessors[cond.accessor], bases, index, value) &&
+                   std::binary_search(cond.native_set.begin(), cond.native_set.end(), value);
+        }
+        ReadScalar value;
+        if (!read_scalar(plan.accessors[cond.accessor], bases, index, value))
+            return false;
+        int64_t whole;
+        switch (value.kind)
+        {
+        case ReadScalar::INT:
+            return std::binary_search(cond.native_set.begin(), cond.native_set.end(), value.i);
+        case ReadScalar::FLOAT:
+            if (read_float_is_int(value.f, whole))
+                return std::binary_search(cond.native_set.begin(), cond.native_set.end(), whole);
+            return value.f == value.f && std::binary_search(cond.float_set.begin(), cond.float_set.end(), value.f);
+        case ReadScalar::BOOL:
+            return value.b ? cond.has_true : cond.has_false;
+        case ReadScalar::STRING:
+        {
+            std::string_view text(value.s, value.len);
+            auto it = std::lower_bound(cond.text_set.begin(), cond.text_set.end(), text,
+                [](const std::string &entry, const std::string_view &wanted) { return std::string_view(entry) < wanted; });
+            return it != cond.text_set.end() && std::string_view(*it) == text;
+        }
+        default:
+            return false;
+        }
+    }
+    default:
+    {
+        if (cond.native)
+        {
+            int64_t value;
+            if (!read_native(plan.accessors[cond.accessor], bases, index, value))
+                return false;
+            return read_compare(cond, value);
+        }
+        ReadScalar value, against;
+        if (!read_scalar(plan.accessors[cond.accessor], bases, index, value))
+            return false;
+        against.kind = cond.value_kind;
+        against.i = cond.native_value;
+        against.f = cond.float_value;
+        against.b = cond.native_value != 0;
+        against.s = cond.text.c_str();
+        against.len = cond.text.size();
+        if (cond.op == LUA_OPEQ)
+            return read_equal(value, against) != cond.negate;
+        return cond.swap ? read_less(against, value, cond.op == LUA_OPLE)
+                         : read_less(value, against, cond.op == LUA_OPLE);
+    }
+    }
+}
+
+}
+
+namespace {
+
+// What a call was given to read from.
+enum ReadFrom { READ_ONE, READ_LIST, READ_NOTHING };
+
+ReadFrom read_from(lua_State *state, int idx)
+{
+    if (!lua_istable(state, idx))
+        return READ_ONE;
+    lua_rawgeti(state, idx, 1);
+    bool list = !lua_isnil(state, -1);
+    lua_pop(state, 1);
+    if (list)
+        return READ_LIST;
+    lua_pushnil(state);
+    if (!lua_next(state, idx))
+        return READ_NOTHING;
+    lua_pop(state, 2);
+    return READ_ONE;
+}
+
+// Sets a read up for the container, or table of named containers, at first_idx and the options at
+// options_idx. Pushes the test function, or nil when there is none.
+void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx)
+{
+    luaL_checkstack(state, 20, "df.readFields");
+    if (lua_istable(state, first_idx))
+    {
+        plan.named = true;
+        lua_pushnil(state);
+        while (lua_next(state, first_idx))
+        {
+            if (lua_type(state, -2) != LUA_TSTRING)
+                luaL_error(state, "df.readFields: containers in a table must have string names");
+            std::string name = lua_tostring(state, -2);
+            if (name.empty() || name == "_index" || name == "_from" || name.find('.') != std::string::npos)
+                luaL_error(state, "df.readFields: '%s' cannot be used as a container name", name.c_str());
+            read_add_source(state, plan, lua_gettop(state), name);
+            lua_pop(state, 1);
+        }
+        if (plan.sources.empty())
+            luaL_error(state, "df.readFields: no containers given");
+    }
+    else
+        read_add_source(state, plan, first_idx, "");
+
+    lua_Integer total = lua_Integer(plan.sources[0].outer) * plan.sources[0].inner;
+    for (const ReadSource &src : plan.sources)
+        if (lua_Integer(src.outer) * src.inner != total)
+            luaL_error(state, "df.readFields: the containers do not have the same number of entries");
+
+    lua_pushnil(state);
+    const int test_idx = lua_gettop(state);
+
+    if (lua_istable(state, options_idx))
+    {
+        lua_getfield(state, options_idx, "test");
+        if (!lua_isnil(state, -1))
+        {
+            if (!lua_isfunction(state, -1))
+                luaL_error(state, "df.readFields: test must be a function");
+            plan.has_test = true;
+        }
+        lua_replace(state, test_idx);
+
+        lua_getfield(state, options_idx, "where");
+        if (!lua_isnil(state, -1))
+        {
+            if (!lua_istable(state, -1))
+                luaL_error(state, "df.readFields: where must be a table");
+            int where_idx = lua_gettop(state);
+            ReadCond all;
+            int count = int(lua_rawlen(state, where_idx));
+            if (count == 0)
+            {
+                lua_pushnil(state);
+                if (lua_next(state, where_idx))
+                    luaL_error(state, "df.readFields: where must be a list of conditions");
+            }
+            for (int i = 1; i <= count; i++)
+            {
+                lua_rawgeti(state, where_idx, i);
+                all.kids.push_back(read_parse_cond(state, plan, lua_gettop(state), 0));
+                lua_pop(state, 1);
+            }
+            plan.conds.push_back(all);
+            plan.root = plan.conds.size() - 1;
+            plan.has_where = true;
+        }
+        lua_pop(state, 1);
+
+        lua_getfield(state, options_idx, "fields");
+        if (!lua_isnil(state, -1))
+        {
+            if (!lua_istable(state, -1))
+                luaL_error(state, "df.readFields: fields must be a table");
+            int count = int(lua_rawlen(state, -1));
+            for (int i = 1; i <= count; i++)
+            {
+                lua_rawgeti(state, -1, i);
+                if (lua_type(state, -1) != LUA_TSTRING)
+                    luaL_error(state, "df.readFields: field names must be strings");
+                std::string name = lua_tostring(state, -1);
+                lua_pop(state, 1);
+                if (std::find(plan.names.begin(), plan.names.end(), name) == plan.names.end())
+                    plan.names.push_back(name);
+            }
+        }
+        lua_pop(state, 1);
+    }
+
+    for (const std::string &name : plan.names)
+        plan.columns.push_back(read_compile(state, plan, name));
+}
+
+// Does a read that has been set up. from_idx holds what to read from: a list of containers (or of
+// tables of named ones) when is_list is set, else just the one. first_bound says the plan was set
+// up from the first of them a moment ago, so that one need not be looked at again.
+int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list, int out_idx, int test_idx,
+             bool first_bound)
+{
+    luaL_checkstack(state, int(plan.names.size()) + 20, "df.readFields: too many fields");
+
+    // one array per field, each at a fixed stack index
+    int column_base = lua_gettop(state);
+    for (const std::string &name : plan.names)
+    {
+        lua_getfield(state, out_idx, name.c_str());
+        if (!lua_istable(state, -1))
+        {
+            lua_pop(state, 1);
+            lua_newtable(state);
+            lua_pushvalue(state, -1);
+            lua_setfield(state, out_idx, name.c_str());
+        }
+    }
+
+    const size_t source_count = plan.sources.size();
+    std::vector<ReadBound> bound(source_count);
+    std::vector<uint8_t*> bases(source_count);
+    std::vector<ReadCursor> cursors(source_count);
+
+    // Finds where each container keeps the entry the cursors are at. False when one of them holds
+    // a null pointer there.
+    auto locate = [&plan, &bound, &bases, &cursors, source_count]() {
+        bool present = true;
+        for (size_t i = 0; i < source_count; i++)
+        {
+            const ReadSource &src = plan.sources[i];
+            ReadCursor &cursor = cursors[i];
+            uint8_t *entry;
+            if (src.pointers)
+                entry = *(uint8_t**)src.container->raw_item_pointer(&df::identity_traits<void*>::identity,
+                                                                    bound[i].ptr, cursor.outer);
+            else
+            {
+                if (!cursor.item_ok)
+                {
+                    cursor.item = (uint8_t*)src.container->raw_item_pointer(src.item, bound[i].ptr, cursor.outer);
+                    cursor.item_ok = true;
+                }
+                entry = cursor.item;
+                if (entry)
+                    entry += size_t(cursor.inner) * src.leaf_size;
+                if (entry && src.leaf_pointers)
+                    entry = *(uint8_t**)entry;
+            }
+            if (!entry)
+                present = false;
+            bases[i] = entry;
+        }
+        return present;
+    };
+    auto advance = [&plan, &cursors, source_count]() {
+        for (size_t i = 0; i < source_count; i++)
+        {
+            ReadCursor &cursor = cursors[i];
+            if (++cursor.inner >= plan.sources[i].inner)
+            {
+                cursor.inner = 0;
+                cursor.outer++;
+                cursor.item_ok = false;
+            }
+        }
+    };
+
+    lua_Integer found = 0;
+    lua_Integer places = is_list ? lua_Integer(lua_rawlen(state, from_idx)) : 1;
+    for (lua_Integer place = 1; place <= places; place++)
+    {
+        lua_Integer total;
+        if (place == 1 && first_bound)
+        {
+            for (size_t i = 0; i < source_count; i++)
+            {
+                bound[i].ptr = plan.sources[i].ptr;
+                bound[i].outer = plan.sources[i].outer;
+            }
+            total = lua_Integer(plan.sources[0].outer) * plan.sources[0].inner;
+        }
+        else
+        {
+            if (is_list)
+                lua_rawgeti(state, from_idx, place);
+            else
+                lua_pushvalue(state, from_idx);
+            total = read_bind(state, plan, lua_gettop(state), bound);
+            lua_pop(state, 1);
+        }
+        std::fill(cursors.begin(), cursors.end(), ReadCursor());
+
+        for (lua_Integer index = 0; index < total; index++, advance())
+        {
+            if (!locate())
+                continue;
+
+            if (plan.has_where && !read_test(plan, plan.root, bases, index))
+                continue;
+
+            if (plan.has_test)
+            {
+                lua_pushvalue(state, test_idx);
+                lua_pushinteger(state, index);
+                lua_call(state, 1, 1);
+                bool keep = lua_toboolean(state, -1) != 0;
+                lua_pop(state, 1);
+                for (size_t i = 0; i < source_count; i++)
+                    if (plan.sources[i].dynamic &&
+                        plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
+                        luaL_error(state, "df.readFields: a container changed size during the read");
+                // the function may have moved or replaced the entry
+                for (ReadCursor &cursor : cursors)
+                    cursor.item_ok = false;
+                if (!keep || !locate())
+                    continue;
+            }
+
+            found++;
+            for (size_t i = 0; i < plan.columns.size(); i++)
+            {
+                const ReadAccessor &acc = plan.accessors[plan.columns[i]];
+                if (acc.kind == ReadAccessor::FROM)
+                    lua_pushinteger(state, place);
+                else
+                    read_push(state, acc, bases, index);
+                lua_rawseti(state, column_base + 1 + int(i), found);
+            }
+        }
+    }
+
+    lua_pushvalue(state, out_idx);
+    lua_pushinteger(state, found);
+    return 2;
+}
+
+// Makes sure there is a table to write to at idx.
+void read_check_out(lua_State *state, int idx)
+{
+    if (lua_isnil(state, idx))
+    {
+        lua_newtable(state);
+        lua_replace(state, idx);
+    }
+    else if (!lua_istable(state, idx))
+        luaL_error(state, "df.readFields: out must be a table");
+}
+
+}
+
+static int meta_read_fields(lua_State *state)
+{
+    int argc = lua_gettop(state);
+    if (argc < 1 || argc > 3)
+        luaL_error(state, "Usage: df.readFields(container[, options[, out]])");
+    lua_settop(state, 3);
+    if (!lua_isnil(state, 2) && !lua_istable(state, 2))
+        luaL_error(state, "df.readFields: options must be a table");
+    read_check_out(state, 3);
+    luaL_checkstack(state, 20, "df.readFields");
+
+    ReadFrom from = read_from(state, 1);
+    if (from == READ_NOTHING)
+    {
+        lua_pushvalue(state, 3);
+        lua_pushinteger(state, 0);
+        return 2;
+    }
+
+    ReadPlan plan;
+    if (from == READ_LIST)
+        lua_rawgeti(state, 1, 1);
+    else
+        lua_pushvalue(state, 1);
+    // stack: [container, options, out, first]
+    read_setup(state, plan, 4, 2);
+    // stack: [container, options, out, first, test]
+    return read_run(state, plan, 1, from == READ_LIST, 3, 5, true);
+}
+
+static int read_plan_gc(lua_State *state)
+{
+    ((ReadPlan*)lua_touserdata(state, 1))->~ReadPlan();
+    return 0;
+}
+
+// The function df.prepareReadFields returns. Upvalues: the type table, the plan, the test function.
+static int read_prepared_call(lua_State *state)
+{
+    int argc = lua_gettop(state);
+    if (argc < 1 || argc > 2)
+        luaL_error(state, "Usage: read(container[, out]), with read made by df.prepareReadFields");
+    lua_settop(state, 2);
+    read_check_out(state, 2);
+    luaL_checkstack(state, 20, "df.readFields");
+
+    ReadFrom from = read_from(state, 1);
+    if (from == READ_NOTHING)
+    {
+        lua_pushvalue(state, 2);
+        lua_pushinteger(state, 0);
+        return 2;
+    }
+
+    auto plan = (const ReadPlan*)lua_touserdata(state, lua_upvalueindex(2));
+    lua_pushvalue(state, lua_upvalueindex(3));
+    // stack: [container, out, test]
+    return read_run(state, *plan, 1, from == READ_LIST, 2, 3, false);
+}
+
+static int meta_prepare_read_fields(lua_State *state)
+{
+    int argc = lua_gettop(state);
+    if (argc < 1 || argc > 2)
+        luaL_error(state, "Usage: df.prepareReadFields(container[, options])");
+    lua_settop(state, 2);
+    if (!lua_isnil(state, 2) && !lua_istable(state, 2))
+        luaL_error(state, "df.readFields: options must be a table");
+    luaL_checkstack(state, 20, "df.readFields");
+
+    ReadFrom from = read_from(state, 1);
+    if (from == READ_NOTHING)
+        luaL_error(state, "df.readFields: no containers given");
+
+    auto plan = new (lua_newuserdata(state, sizeof(ReadPlan))) ReadPlan();
+    if (luaL_newmetatable(state, "df.readFields.plan"))
+    {
+        lua_pushcfunction(state, read_plan_gc);
+        lua_setfield(state, -2, "__gc");
+    }
+    lua_setmetatable(state, 3);
+    if (from == READ_LIST)
+        lua_rawgeti(state, 1, 1);
+    else
+        lua_pushvalue(state, 1);
+    // stack: [container, options, plan, first]
+    read_setup(state, *plan, 4, 2);
+    // stack: [container, options, plan, first, test]
+    lua_pushvalue(state, UPVAL_TYPETABLE);
+    lua_pushvalue(state, 3);
+    lua_pushvalue(state, 5);
+    lua_pushcclosure(state, read_prepared_call, 3);
+    return 1;
+}
+
 static int meta_reinterpret_cast(lua_State *state)
 {
     int argc = lua_gettop(state);
@@ -1886,6 +3553,14 @@ static int DoAttach(lua_State *state)
     lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_CAST_NAME);
 
     lua_rawgetp(state, LUA_REGISTRYINDEX, &DFHACK_TYPETABLE_TOKEN);
+    lua_pushcclosure(state, meta_read_fields, 1);
+    lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_READ_FIELDS_NAME);
+
+    lua_rawgetp(state, LUA_REGISTRYINDEX, &DFHACK_TYPETABLE_TOKEN);
+    lua_pushcclosure(state, meta_prepare_read_fields, 1);
+    lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_PREPARE_READ_FIELDS_NAME);
+
+    lua_rawgetp(state, LUA_REGISTRYINDEX, &DFHACK_TYPETABLE_TOKEN);
     lua_pushcclosure(state, meta_assign, 1);
     lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_ASSIGN_NAME);
 
@@ -1921,6 +3596,10 @@ static int DoAttach(lua_State *state)
         lua_setfield(state, -2, "is_instance");
         lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_CAST_NAME);
         lua_setfield(state, -2, "reinterpret_cast");
+        lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_READ_FIELDS_NAME);
+        lua_setfield(state, -2, "readFields");
+        lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_PREPARE_READ_FIELDS_NAME);
+        lua_setfield(state, -2, "prepareReadFields");
 
         lua_pushlightuserdata(state, NULL);
         lua_setfield(state, -2, "NULL");
