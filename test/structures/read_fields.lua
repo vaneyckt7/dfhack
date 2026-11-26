@@ -1020,9 +1020,9 @@ function test.range_on_a_grid()
             where={{'des.flow_size', '>', 0}}})
         expect.table_eq(column(out, '_index', n), {2 * 16 + 3, 2 * 16 + 9, 3 * 16 + 4, 6 * 16 + 3})
 
-        -- a grid with the range given on its own
-        out, n = df.read_fields(block.designation, {fields={'_index'}, where={{'flow_size', '>', 0}}}, nil,
-            {{2, 3, 4, 15}})
+        -- a grid on its own, given a name so that it can have a range
+        out, n = df.read_fields({des=block.designation, _range={2, 3, 4, 15}},
+            {fields={'_index'}, where={{'des.flow_size', '>', 0}}})
         expect.table_eq(column(out, '_index', n), {2 * 16 + 9, 3 * 16 + 4})
     end)
 end
@@ -1203,8 +1203,8 @@ function test.lists_of_objects()
         local froms = {}
         with_job(function(job)
             local items = job.job_items.elements
-            df.read_fields({items, items}, {test=function(i, from) froms[#froms + 1] = from end, limit=1},
-                          nil, {{0, 0}, {0, 1}})
+            df.read_fields({{items=items, _range={0, 0}}, {items=items, _range={0, 1}}},
+                           {test=function(i, from) froms[#froms + 1] = from end, limit=1})
         end)
         expect.table_eq(froms, {1, 2, 2})
         expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
