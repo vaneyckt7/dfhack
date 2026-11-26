@@ -555,7 +555,10 @@ The ``df`` table itself contains the following functions and values:
 
   ``fields``
     A list of field names to read. A name is a path of steps separated by
-    dots. A step can be:
+    dots. In place of a name, ``{path='des.flow_size', as='flow'}`` reads
+    that path and stores it in ``out`` under the other name, here
+    ``out.flow``; two different paths cannot be stored under one name. A
+    step can be:
 
     - a field of a structure (``pos.x``), or a pointer field, which is
       followed (``item.id``)
@@ -573,7 +576,12 @@ The ``df`` table itself contains the following functions and values:
       actual class, as ``object._type`` gives it
     - ``_target``, after a field that holds the id of an object: the object
       with that id, found the way the ``find`` function of its type finds it,
-      and *nil* when there is none (``hist_figure_id._target.name.first_name``)
+      and *nil* when there is none (``hist_figure_id._target.name.first_name``).
+      It also follows an entry of a vector or an array of ids
+      (``histfig_ids.0._target``), and ``_value`` in the conditions of ``any``
+      and ``all`` on one: ``{'histfig_ids', 'any', {{'_value._target.race',
+      '==', race}}}``. A vector of ids that is itself what is read from does
+      not say what its numbers are ids of, so it cannot be followed.
     - a method that takes no arguments, written with ``()``, as the last step
       (``getType()``, ``item.getQuality()``). A method runs game code for
       every entry, so it is slower than a field, and it must be one that is
@@ -643,7 +651,7 @@ The ``df`` table itself contains the following functions and values:
     ``df.NULL``, using ``==`` or ``~=``: ``{'item', '~=', df.NULL}``. A pointer
     can be compared in the same way with an object, to ask whether it points
     to that object. These are the only things a condition can do with a path
-    that ends at a pointer. ``_from`` cannot be used in a condition.
+    that ends at a pointer. ``_from`` can be compared like any number, except inside ``any`` and ``all``.
 
     All conditions are checked inside DFHack, without calling into Lua. What
     they cannot express (arithmetic, calls to ``dfhack`` functions, methods

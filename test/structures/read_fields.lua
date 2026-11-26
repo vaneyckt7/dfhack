@@ -421,7 +421,7 @@ function test.errors()
         expect.error_match('not a single value', function() df.readFields(job.items, {where={{'_value', '==', 1}}}) end)
         expect.error_match('no readable attribute', function() df.readFields(items, {fields={'item_type.nope'}}) end)
         expect.error_match('has no attributes', function() df.readFields(items, {fields={'quantity.nope'}}) end)
-        expect.error_match('field names must be strings', function() df.readFields(items, {fields={5}}) end)
+        expect.error_match('must be a string or', function() df.readFields(items, {fields={5}}) end)
         expect.error_match('fields must be a table', function() df.readFields(items, {fields='quantity'}) end)
         expect.error_match('where must be a table', function() df.readFields(items, {where='quantity'}) end)
         expect.error_match('list of conditions', function() df.readFields(items, {where={quantity=3}}) end)
@@ -735,8 +735,18 @@ function test.lists_of_containers()
             expect.error_match('not of the kind', function() df.readFields({a, job.items}) end)
             expect.error_match('expected a container', function() df.readFields({a, 5}) end)
             expect.error_match('expected a container', function() df.readFields({a, {x=b}}) end)
-            expect.error_match("'_from' cannot be used in a condition", function()
-                df.readFields({a, b}, {where={{'_from', '==', 1}}})
+            -- '_from' in a condition
+            out, n = df.readFields({a, b}, {fields={'_from', '_index'}, where={{'_from', '==', 2}, {'quantity', '>', 4}}})
+            expect.table_eq(column(out, '_from', n), {2, 2, 2})
+            expect.table_eq(column(out, '_index', n), {0, 2, 3})
+            out, n = df.readFields({a, b}, {fields={'_index'},
+                where={{'or', {'and', {'_from', '==', 1}, {'_index', '==', 4}},
+                              {'and', {'_from', 'in', {2}}, {'_index', '<', 1}}}}})
+            expect.table_eq(column(out, '_index', n), {4, 0})
+            out, n = df.readFields(a, {where={{'_from', '==', 1}}})
+            expect.eq(n, 5)
+            expect.error_match("'_from' cannot be used in the conditions of any or all", function()
+                df.readFields({job}, {where={{'job_items.elements', 'any', {{'_from', '==', 1}}}}})
             end)
         end)
     end)
@@ -1855,4 +1865,90 @@ function test.each()
         end)
         expect.error_match('each must be a function', function() df.readFields(items, {each=1}) end)
     end)
+end
+
+function test.fields_under_other_names()
+    with_job(function(job)
+        local items = job.job_items.elements
+        local out, n = df.readFields(items, {fields={{path='quantity', as='q'}, '_index', {path='flags1.improvable', as='imp'}},
+                                             where={{'quantity', '>', 2}}})
+        expect.eq(n, 3)
+        expect.table_eq(column(out, 'q', n), {3, 7, 5})
+        expect.table_eq(column(out, '_index', n), {0, 2, 3})
+        expect.table_eq(column(out, 'imp', n), {false, false, true})
+        expect.nil_(out.quantity)
+
+        -- the same field under two names, and the same name twice for the same field
+        out, n = df.readFields(items, {fields={'quantity', {path='quantity', as='again'}, {path='quantity', as='again'}}, limit=2})
+        expect.table_eq(column(out, 'quantity', n), {3, 1})
+        expect.table_eq(column(out, 'again', n), {3, 1})
+
+        -- prepared, and into a table that is reused
+        local read = df.prepareReadFields(items, {fields={{path='mat_index', as='mat'}}})
+        local reused = {}
+        out, n = read(items, reused)
+        expect.eq(out, reused)
+        expect.table_eq(column(out, 'mat', n), {10, 20, 30, 40, 50})
+
+        expect.error_match("two different fields would be stored as 'q'", function()
+            df.readFields(items, {fields={{path='quantity', as='q'}, {path='mat_index', as='q'}}})
+        end)
+        expect.error_match("two different fields would be stored as 'quantity'", function()
+            df.readFields(items, {fields={'quantity', {path='mat_index', as='quantity'}}})
+        end)
+        expect.error_match("must be {path=", function() df.readFields(items, {fields={{path='quantity'}}}) end)
+        expect.error_match("must be {path=", function() df.readFields(items, {fields={{path='quantity', as='q', x=1}}}) end)
+        expect.error_match("must be {path=", function() df.readFields(items, {fields={{'quantity', 'q'}}}) end)
+        expect.error_match("empty name", function() df.readFields(items, {fields={{path='quantity', as=''}}}) end)
+        expect.error_match("must be a string or", function() df.readFields(items, {fields={5}}) end)
+    end)
+end
+
+function test.ids_in_vectors_followed_to_their_objects()
+    local all = df.global.world.entities.all
+    local entity = df.historical_entity:new()
+    entity.id = #all > 0 and all[#all - 1].id + 1000 or 1000
+    entity.type = df.historical_entity_type.MerchantCompany
+    local first, second = df.agreement_party:new(), df.agreement_party:new()
+    first.entity_ids:insert('#', entity.id + 1)
+    first.entity_ids:insert('#', entity.id)
+    second.entity_ids:insert('#', entity.id + 1)
+    all:insert('#', entity)
+    dfhack.with_finalize(
+        function()
+            all:erase(#all - 1)
+            entity:delete()
+            first:delete()
+            second:delete()
+        end,
+        function()
+            local parties = {first, second}
+            -- an entry of a vector of ids, picked by its index
+            local out, n = df.readFields(parties, {fields={'entity_ids.1._target.type', 'entity_ids.0._target',
+                                                           'entity_ids.1._target'}})
+            expect.eq(n, 2)
+            expect.eq(out['entity_ids.1._target.type'][1], df.historical_entity_type.MerchantCompany)
+            expect.eq(out['entity_ids.1._target.type'][2], nil)
+            expect.eq(out['entity_ids.0._target'][1], nil)
+            expect.eq(out['entity_ids.1._target'][1], entity)
+
+            -- any and all of the entries
+            local function matching(cond)
+                local o, count = df.readFields(parties, {fields={'_index'}, where={cond}})
+                return column(o, '_index', count)
+            end
+            local is_company = {'_value._target.type', '==', df.historical_entity_type.MerchantCompany}
+            expect.table_eq(matching{'entity_ids', 'any', {is_company}}, {1})
+            expect.table_eq(matching{'entity_ids', 'all', {is_company}}, {})
+            expect.table_eq(matching{'entity_ids', 'any', {{'_value._target.id', '==', entity.id}}}, {1})
+            expect.table_eq(matching{'entity_ids', 'any', {{'_value', '==', entity.id + 1}}}, {1, 2})
+
+            -- a vector that does not say what its numbers are ids of
+            expect.error_match('not the id of', function()
+                df.readFields(parties, {where={{'complaint', 'any', {{'year._target.id', '==', 1}}}}})
+            end)
+            expect.error_match('not the id of', function()
+                df.readFields(first.entity_ids, {fields={'_value._target'}})
+            end)
+        end)
 end
