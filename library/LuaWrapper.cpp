@@ -928,6 +928,7 @@ struct ReadCond {
     size_t accessor = 0;
     size_t accessor2 = 0;
     TextOp text_op = STARTS;
+    bool fold = false;                  // TEXT: the case of the letters a to z does not matter
     size_t sub = 0;                         // ANY and ALL: which of the plan's subs holds the conditions
     const struct_identity *wanted = nullptr;
     bool exact = false;
@@ -2429,11 +2430,14 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             ordered = false;
             cond.kind = ReadCond::IN;
         }
-        else if (op == "startswith" || op == "endswith" || op == "contains")
+        else if (op == "startswith" || op == "endswith" || op == "contains" ||
+                 op == "istartswith" || op == "iendswith" || op == "icontains")
         {
             ordered = false;
             cond.kind = ReadCond::TEXT;
-            cond.text_op = op == "startswith" ? ReadCond::STARTS : op == "endswith" ? ReadCond::ENDS : ReadCond::CONTAINS;
+            cond.fold = op[0] == 'i';
+            const std::string plain = cond.fold ? op.substr(1) : op;
+            cond.text_op = plain == "startswith" ? ReadCond::STARTS : plain == "endswith" ? ReadCond::ENDS : ReadCond::CONTAINS;
         }
         else if (op == "any" || op == "all")
         {
@@ -2521,6 +2525,10 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             size_t len;
             const char *text = lua_tolstring(state, -1, &len);
             cond.text.assign(text, len);
+            if (cond.fold)
+                for (char &c : cond.text)
+                    if (c >= 'A' && c <= 'Z')
+                        c = char(c - 'A' + 'a');
         }
         else if (cond.kind == ReadCond::IN)
         {
@@ -2661,7 +2669,16 @@ bool read_test(lua_State *state, const ReadPlan &plan, size_t node, const std::v
         ReadScalar value;
         if (!read_scalar(state, plan.accessors[cond.accessor], bases, index, value) || value.kind != ReadScalar::STRING)
             return false;
-        std::string_view text(value.s, value.len), wanted(cond.text);
+        std::string folded;
+        if (cond.fold)
+        {
+            folded.assign(value.s, value.len);
+            for (char &c : folded)
+                if (c >= 'A' && c <= 'Z')
+                    c = char(c - 'A' + 'a');
+        }
+        std::string_view text = cond.fold ? std::string_view(folded) : std::string_view(value.s, value.len);
+        std::string_view wanted(cond.text);
         if (cond.text_op == ReadCond::STARTS)
             return text.substr(0, wanted.size()) == wanted;
         if (cond.text_op == ReadCond::ENDS)
@@ -3123,7 +3140,8 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
         {
             lua_pushvalue(state, test_idx);
             lua_pushinteger(state, index);
-            lua_call(state, 1, 1);
+            lua_pushinteger(state, place);
+            lua_call(state, 2, 1);
             bool keep = lua_toboolean(state, -1) != 0;
             lua_pop(state, 1);
             if (walk)
@@ -3246,6 +3264,19 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
                     visit(lua_Integer(outer) * inner + at);
             }
         }
+    }
+
+    // what an earlier, longer read left behind in the arrays is cleared, up to the first gap
+    for (size_t i = 0; i < plan.columns.size(); i++)
+    {
+        const int column = column_base + 1 + int(i);
+        for (lua_Integer at = found + 1; lua_rawgeti(state, column, at) != LUA_TNIL; at++)
+        {
+            lua_pop(state, 1);
+            lua_pushnil(state);
+            lua_rawseti(state, column, at);
+        }
+        lua_pop(state, 1);
     }
 
     lua_pushvalue(state, out_idx);

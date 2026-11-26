@@ -393,7 +393,7 @@ function test.out_is_reused()
         expect.eq(same, out)
         expect.eq(out.quantity, quantity)
         expect.eq(n, 2)
-        expect.table_eq(out.quantity, {7, 5, 97, 96, 95, 94})
+        expect.table_eq(out.quantity, {7, 5})
         expect.table_eq(out.other, {1})
     end)
 end
@@ -1227,6 +1227,14 @@ function test.lists_of_objects()
         local seen = {}
         out, n = df.readFields({a, b}, {test=function(i) seen[#seen + 1] = i return i == 2 end, fields={'id'}})
         expect.table_eq(seen, {1, 2})
+        -- and, second, the place of the container in the list that was passed in
+        local froms = {}
+        with_job(function(job)
+            local items = job.job_items.elements
+            df.readFields({items, items}, {test=function(i, from) froms[#froms + 1] = from end, limit=1},
+                          nil, {{0, 0}, {0, 1}})
+        end)
+        expect.table_eq(froms, {1, 2, 2})
         expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
 
         out, n = df.readFields({})
@@ -1663,6 +1671,11 @@ function test.sets_and_text()
         expect.table_eq(matching{'reaction_class', 'contains', 'E_F'}, {2})
         expect.table_eq(matching{'reaction_class', 'contains', ''}, {0, 1, 2, 3, 4})
         expect.table_eq(matching{'reaction_class', 'startswith', 'FLUX_STONE_AND_MORE'}, {})
+        -- with an i in front, the case of letters does not matter
+        expect.table_eq(matching{'reaction_class', 'icontains', 'x_s'}, {0})
+        expect.table_eq(matching{'reaction_class', 'contains', 'x_s'}, {})
+        expect.table_eq(matching{'reaction_class', 'istartswith', 'Flux'}, {0, 1})
+        expect.table_eq(matching{'reaction_class', 'iendswith', 'fLUX'}, {1, 2})
         -- the text is looked for as it stands, not as a pattern
         expect.table_eq(matching{'reaction_class', 'contains', '.'}, {})
         expect.table_eq(matching{'not', {'reaction_class', 'contains', 'FLUX'}}, {3, 4})

@@ -610,7 +610,8 @@ The ``df`` table itself contains the following functions and values:
       form in which Lua code usually keeps a set
     - ``startswith``, ``endswith`` and ``contains``, for a field that holds
       text. The text is looked for as it stands, not as a pattern, and upper
-      and lower case differ.
+      and lower case differ; ``istartswith``, ``iendswith`` and ``icontains``
+      are the same with the case of the letters a to z ignored.
     - ``any`` and ``all``, for a path that ends at a vector or an array. The
       value is a list of conditions on the entries of that vector, written
       like ``where`` itself, with paths that start at the entry and ``_value``
@@ -651,7 +652,7 @@ The ``df`` table itself contains the following functions and values:
   ``test``
     A function that is called with the ``_index`` of each entry that passed
     ``where`` (0-based in a container, the 1-based place in a list of
-    objects), and returns whether to keep it. Use it only for checks that
+    objects) and, second, its ``_from``, and returns whether to keep it. Use it only for checks that
     ``where`` cannot express, since it is called once per entry. It must not
     change the number of entries in the container.
 
@@ -665,8 +666,10 @@ The ``df`` table itself contains the following functions and values:
   Returns ``out, n``. ``n`` is the number of entries returned, and ``out`` is a
   table with one array for each name in ``fields``, keyed by that name and
   indexed from 1 to ``n``. If ``out`` is passed in, it and the arrays it
-  already holds are reused. Array entries past ``n`` are not cleared, and
-  neither are arrays for fields that this read was not asked for. Without
+  already holds are reused. What an earlier read left in an array past
+  ``n`` is cleared, up to the first *nil* (values can be *nil*, so go by
+  ``n`` and not by ``#``). Arrays for fields that this read was not asked
+  for are left as they are. Without
   ``fields``, only the count is useful.
 
 * ``df.prepareReadFields(container[, options])``
