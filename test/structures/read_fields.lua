@@ -1589,19 +1589,19 @@ function test.ids_followed_to_their_objects()
             end,
             function()
                 -- '_target' goes from an id to the object that has it, as the type's find() does
-                local out, n = df.readFields(refs, {fields={'entity_id._target.id', 'entity_id._target.type',
-                                                           'entity_id._target'}})
+                local out, n = df.readFields(refs, {fields={'general_ref_entity:entity_id._target.id', 'general_ref_entity:entity_id._target.type',
+                                                           'general_ref_entity:entity_id._target'}})
                 expect.eq(n, 2)
-                expect.eq(out['entity_id._target.id'][1], entity.id)
-                expect.eq(out['entity_id._target.id'][2], nil)
-                expect.eq(out['entity_id._target.type'][1], df.historical_entity_type.MerchantCompany)
-                expect.eq(out['entity_id._target'][1], entity)
-                expect.eq(out['entity_id._target'][2], nil)
+                expect.eq(out['general_ref_entity:entity_id._target.id'][1], entity.id)
+                expect.eq(out['general_ref_entity:entity_id._target.id'][2], nil)
+                expect.eq(out['general_ref_entity:entity_id._target.type'][1], df.historical_entity_type.MerchantCompany)
+                expect.eq(out['general_ref_entity:entity_id._target'][1], entity)
+                expect.eq(out['general_ref_entity:entity_id._target'][2], nil)
 
-                out, n = df.readFields(refs, {fields={'_index'}, where={{'entity_id._target.type', '==',
+                out, n = df.readFields(refs, {fields={'_index'}, where={{'general_ref_entity:entity_id._target.type', '==',
                                                                         df.historical_entity_type.MerchantCompany}}})
                 expect.table_eq(column(out, '_index', n), {0})
-                out, n = df.readFields(refs, {fields={'_index'}, where={{'entity_id._target.type', '~=',
+                out, n = df.readFields(refs, {fields={'_index'}, where={{'general_ref_entity:entity_id._target.type', '~=',
                                                                         df.historical_entity_type.MerchantCompany}}})
                 expect.eq(n, 0)
 
