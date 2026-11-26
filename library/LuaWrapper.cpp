@@ -804,8 +804,7 @@ struct ReadHop {
 };
 
 // How a value lies in memory, which decides how a condition reads it.
-// LEAF_DYNAMIC is what a method gives back, which is only known once it has been called.
-enum ReadLeaf { LEAF_INT, LEAF_BOOL, LEAF_FLOAT, LEAF_DOUBLE, LEAF_STRING, LEAF_CSTRING, LEAF_OTHER, LEAF_DYNAMIC };
+enum ReadLeaf { LEAF_INT, LEAF_BOOL, LEAF_FLOAT, LEAF_DOUBLE, LEAF_STRING, LEAF_CSTRING, LEAF_OTHER };
 
 struct ReadAttr {
     const enum_identity *owner;
@@ -828,8 +827,7 @@ struct ReadAccessor {
     // array, SIZE the number of entries of a container, TYPE the type of an object, REF whatever
     // reading the place in Lua gives when that is not a single value, and GROUP a run of entries
     // for a condition on any or all of them.
-    // CALL is what a method of the object gives back.
-    enum Kind { INDEX, FROM, VALUE, BIT, WHOLE, PTR, FLAG, SIZE, TYPE, REF, GROUP, CALL };
+    enum Kind { INDEX, FROM, VALUE, BIT, WHOLE, PTR, FLAG, SIZE, TYPE, REF, GROUP };
     Kind kind = VALUE;
     size_t source = 0;
     // offsets[0] is added to the entry's address; every further one is added after the hop of the
@@ -840,9 +838,7 @@ struct ReadAccessor {
     const df::bit_container_identity *flags = nullptr;
     int flag = 0;
     const struct_field_info *ref_field = nullptr;   // REF: the field to read, or null to read type
-    std::string call_name;                          // CALL: the name of the method
     const type_identity *seq_target = nullptr;      // GROUP: what the entries are ids of, when known
-    const function_identity_base *call = nullptr;   // CALL: the method, called on an object of type
     const type_identity *type = nullptr;
     unsigned bit = 0;
     int bit_size = 1;
@@ -869,7 +865,6 @@ struct ReadScalar {
     bool b = false;
     const char *s = nullptr;
     size_t len = 0;
-    std::string own;                        // the text, where nothing else keeps it
 };
 
 void read_scalar_from_lua(lua_State *state, int idx, ReadScalar &out);
@@ -887,20 +882,6 @@ void read_invoke(lua_State *state, const function_identity_base *fn, int base)
     catch (std::exception &e) {
         luaL_error(state, "df.readFields: C++ exception: %s", e.what());
     }
-}
-
-// Calls a method that takes no arguments on the object at ptr, the way Lua code calls it, since the
-// method checks what it is called on against the object's own class. Leaves what it gives back on
-// top of the stack.
-void read_call(lua_State *state, const ReadAccessor &acc, const void *ptr)
-{
-    push_object_internal(state, acc.type, (void*)ptr);
-    lua_getfield(state, -1, acc.call_name.c_str());
-    if (!lua_isfunction(state, -1))
-        luaL_error(state, "df.readFields: cannot call '%s' on %s", acc.call_name.c_str(),
-                   acc.type->getFullName().c_str());
-    lua_insert(state, -2);
-    lua_call(state, 1, 1);
 }
 
 // A condition on a whole number or a flag that lies at a fixed place in an entry, worked out ahead
@@ -1546,9 +1527,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                 continue;
             }
             auto owner_type = (const struct_identity*)cur;
-            // name() calls a method that takes no arguments
-            const bool is_call = part.size() > 2 && part.compare(part.size() - 2, 2, "()") == 0;
-            std::string field_name = is_call ? part.substr(0, part.size() - 2) : part;
+            std::string field_name = part;
             const struct_identity *narrowed = nullptr;
             size_t colon = field_name.find(':');
             if (colon != std::string::npos)
@@ -1588,31 +1567,11 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                                                (const virtual_identity*)narrowed});
             }
             from_field = nullptr;
-            if (is_call != (field->mode == struct_field_info::OBJ_METHOD))
-                luaL_error(state, is_call ? "df.readFields: '%s' in '%s' is not a method"
-                                          : "df.readFields: '%s' in '%s' is a method; write it with () after it",
-                           field_name.c_str(), path.c_str());
+            if (field->mode == struct_field_info::OBJ_METHOD)
+                luaL_error(state, "df.readFields: '%s' in '%s' is a method, which a path cannot call; "
+                                  "call it in 'test' or 'each'", field_name.c_str(), path.c_str());
             switch (field->mode)
             {
-            case struct_field_info::OBJ_METHOD:
-            {
-                auto fn = (const function_identity_base*)field->type;
-                if (!fn || fn->getNumArgs() != 1 || fn->adjustArgs())
-                    luaL_error(state, "df.readFields: '%s' in '%s' takes arguments, which a path cannot give",
-                               part.c_str(), path.c_str());
-                if (at + 1 != parts.size())
-                    luaL_error(state, "df.readFields: '%s' must be the last step of '%s'", part.c_str(), path.c_str());
-                if (use == USE_GROUP)
-                    luaL_error(state, "df.readFields: '%s' is not a container or an array, which 'any' and "
-                                      "'all' need", path.c_str());
-                acc.kind = ReadAccessor::CALL;
-                acc.call = fn;
-                acc.call_name = field_name;
-                acc.type = narrowed ? narrowed : cur;
-                done = true;
-                owner = nullptr;
-                break;
-            }
             case struct_field_info::PRIMITIVE:
             case struct_field_info::SUBSTRUCT:
                 if (!field->type)
@@ -1752,7 +1711,6 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
     case ReadAccessor::WHOLE: acc.leaf = LEAF_INT; break;
     case ReadAccessor::FLAG:  acc.leaf = LEAF_BOOL; break;
     case ReadAccessor::SIZE:  acc.leaf = LEAF_INT; break;
-    case ReadAccessor::CALL:  acc.leaf = LEAF_DYNAMIC; break;
     default:                  acc.leaf = LEAF_OTHER;
     }
     if (!attrs_native)
@@ -1953,22 +1911,6 @@ bool read_scalar(lua_State *state, const ReadAccessor &acc, const std::vector<ui
         out.kind = ReadScalar::INT;
         out.i = read_seq_count(acc.seq, (uint8_t*)ptr);
         break;
-    case ReadAccessor::CALL:
-    {
-        read_call(state, acc, ptr);
-        const bool nothing = lua_isnil(state, -1);
-        read_scalar_from_lua(state, -1, out);
-        if (out.kind == ReadScalar::STRING)
-        {
-            // the text goes away with the value on the stack
-            out.own.assign(out.s, out.len);
-            out.s = out.own.data();
-        }
-        lua_pop(state, 1);
-        if (nothing)
-            return false;
-        break;
-    }
     default:
         return false;
     }
@@ -2297,9 +2239,6 @@ bool read_push(lua_State *state, const ReadAccessor &acc, const std::vector<uint
     case ReadAccessor::TYPE:
         LookupInTable(state, read_dynamic_type(acc, ptr), &DFHACK_TYPEID_TABLE_TOKEN);
         break;
-    case ReadAccessor::CALL:
-        read_call(state, acc, ptr);
-        break;
     case ReadAccessor::REF:
         if (acc.ref_field)
             push_field_value(state, acc.ref_field, ptr);
@@ -2541,7 +2480,7 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             luaL_error(state, "df.readFields: '%s' holds a kind of value that conditions cannot compare", head.c_str());
         else if (cond.kind == ReadCond::TEXT)
         {
-            if ((acc.leaf != LEAF_STRING && acc.leaf != LEAF_CSTRING && acc.leaf != LEAF_DYNAMIC) ||
+            if ((acc.leaf != LEAF_STRING && acc.leaf != LEAF_CSTRING) ||
                 lua_type(state, -1) != LUA_TSTRING)
                 luaL_error(state, "df.readFields: '%s' on '%s' needs a field that holds text, and text to look for",
                            op.c_str(), head.c_str());

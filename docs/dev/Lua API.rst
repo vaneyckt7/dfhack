@@ -582,10 +582,6 @@ The ``df`` table itself contains the following functions and values:
       and ``all`` on one: ``{'histfig_ids', 'any', {{'_value._target.race',
       '==', race}}}``. A vector of ids that is itself what is read from does
       not say what its numbers are ids of, so it cannot be followed.
-    - a method that takes no arguments, written with ``()``, as the last step
-      (``getType()``, ``item.getQuality()``). A method runs game code for
-      every entry, so it is slower than a field, and it must be one that is
-      safe to call from Lua.
 
     ``_index`` is the 0-based index of the entry in its container, ``_from``
     is the 1-based place of that container in the list that was passed in (1
@@ -655,7 +651,7 @@ The ``df`` table itself contains the following functions and values:
 
     All conditions are checked inside DFHack, without calling into Lua. What
     they cannot express (arithmetic, calls to ``dfhack`` functions, methods
-    that take arguments) goes in ``test``.
+    of the objects) goes in ``test``.
 
   ``test``
     A function that is called with the ``_index`` of each entry that passed

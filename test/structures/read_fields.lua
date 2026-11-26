@@ -1547,48 +1547,15 @@ function test.types()
     end)
 end
 
-function test.methods()
+function test.methods_are_not_called()
     with_job(function(job)
         local refs = job.general_refs
-        local worker = df.general_ref_unit_workerst:new()
-        local holder = df.general_ref_building_holderst:new()
-        refs:insert('#', worker)
-        refs:insert('#', holder)
-        dfhack.with_finalize(
-            function()
-                refs:resize(0)
-                worker:delete()
-                holder:delete()
-            end,
-            function()
-                -- a method that takes no arguments can end a path
-                local out, n = df.readFields(refs, {fields={'getType()'}})
-                expect.eq(n, 2)
-                expect.eq(out['getType()'][1], df.general_ref_type.UNIT_WORKER)
-                expect.eq(out['getType()'][2], df.general_ref_type.BUILDING_HOLDER)
-                expect.eq(out['getType()'][1], worker:getType())
-
-                out, n = df.readFields(refs, {fields={'_index'},
-                                              where={{'getType()', '==', df.general_ref_type.BUILDING_HOLDER}}})
-                expect.table_eq(column(out, '_index', n), {1})
-                out, n = df.readFields(refs, {fields={'_index'},
-                    where={{'getType()', 'in', {df.general_ref_type.UNIT_WORKER, df.general_ref_type.ITEM}}}})
-                expect.table_eq(column(out, '_index', n), {0})
-                out, n = df.readFields({job}, {where={{'general_refs.1.getType()', '==',
-                                                      df.general_ref_type.BUILDING_HOLDER}}})
-                expect.eq(n, 1)
-
-                expect.error_match('is a method; write it with %(%)', function()
-                    df.readFields(refs, {fields={'getType'}})
-                end)
-                expect.error_match('is not a method', function()
-                    df.readFields(job.job_items.elements, {fields={'quantity()'}})
-                end)
-                expect.error_match('must be the last step', function()
-                    df.readFields(refs, {fields={'getType().x'}})
-                end)
-                expect.error_match('takes arguments', function() df.readFields(refs, {fields={'setID()'}}) end)
-            end)
+        expect.error_match('is a method, which a path cannot call', function()
+            df.readFields(refs, {fields={'getType'}})
+        end)
+        expect.error_match("no field 'getType%(%)'", function()
+            df.readFields(refs, {where={{'getType()', '==', 1}}})
+        end)
     end)
 end
 
