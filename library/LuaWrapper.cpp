@@ -2802,34 +2802,15 @@ void read_parse_range(lua_State *state, const ReadPlan &plan, int idx, int outer
 }
 
 // Looks for the range of the place-th item of the list, which is the table at item_idx when it is
-// one of named containers, or entry place of the list of ranges at ranges_idx (0 when there is none).
-void read_find_range(lua_State *state, const ReadPlan &plan, int item_idx, int ranges_idx,
-                     lua_Integer place, int outer, ReadRange &range)
+// one of named containers and has the key '_range'.
+void read_find_range(lua_State *state, const ReadPlan &plan, int item_idx, int outer, ReadRange &range)
 {
-    bool found = false;
-    if (plan.named && lua_istable(state, item_idx))
-    {
-        lua_pushliteral(state, "_range");
-        lua_rawget(state, item_idx);
-        if (lua_isnil(state, -1))
-            lua_pop(state, 1);
-        else
-            found = true;
-    }
-    if (ranges_idx)
-    {
-        lua_rawgeti(state, ranges_idx, place);
-        if (lua_isnil(state, -1))
-            lua_pop(state, 1);
-        else if (found)
-            luaL_error(state, "df.readFields: item %d has a range both as '_range' and in the list of ranges",
-                       int(place));
-        else
-            found = true;
-    }
-    if (!found)
+    if (!plan.named || !lua_istable(state, item_idx))
         return;
-    read_parse_range(state, plan, lua_gettop(state), outer, range);
+    lua_pushliteral(state, "_range");
+    lua_rawget(state, item_idx);
+    if (!lua_isnil(state, -1))
+        read_parse_range(state, plan, lua_gettop(state), outer, range);
     lua_pop(state, 1);
 }
 
@@ -3058,10 +3039,9 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
 // Does a read that has been set up. from_idx holds what to read from: a list of containers (or of
 // tables of named ones) when is_list is set, else just the one. A read set up for objects takes a
 // list of them, and one set up for a linked list takes the list's first link. first_bound says the plan was set
-// up from the first of them a moment ago, so that one need not be looked at again. ranges_idx holds
-// a list of ranges, one for each place, or is 0.
+// up from the first of them a moment ago, so that one need not be looked at again.
 int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list, int out_idx, int test_idx,
-             int each_idx, bool first_bound, int ranges_idx)
+             int each_idx, bool first_bound)
 {
     luaL_checkstack(state, int(plan.names.size()) + 20, "df.readFields: too many fields");
 
@@ -3211,9 +3191,6 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             full = true;
     };
 
-    if (!walk && ranges_idx)
-        luaL_error(state, "df.readFields: ranges can only be given for containers");
-
     if (mode == ReadSource::OBJECTS)
     {
         const type_identity *wanted = plan.sources[0].leaf;
@@ -3277,7 +3254,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             total = read_bind(state, plan, item_idx, bound);
 
         ReadRange range;
-        read_find_range(state, plan, item_idx, ranges_idx, place, bound[0].outer, range);
+        read_find_range(state, plan, item_idx, bound[0].outer, range);
         lua_pop(state, 1);
 
         std::fill(cursors.begin(), cursors.end(), ReadCursor());
@@ -3335,25 +3312,17 @@ void read_check_out(lua_State *state, int idx)
         luaL_error(state, "df.readFields: out must be a table");
 }
 
-// The list of ranges at idx, if there is one, must be a table.
-void read_check_ranges(lua_State *state, int idx)
-{
-    if (!lua_isnil(state, idx) && !lua_istable(state, idx))
-        luaL_error(state, "df.readFields: ranges must be a table");
-}
-
 }
 
 static int meta_read_fields(lua_State *state)
 {
     int argc = lua_gettop(state);
-    if (argc < 1 || argc > 4)
-        luaL_error(state, "Usage: df.readFields(container[, options[, out[, ranges]]])");
-    lua_settop(state, 4);
+    if (argc < 1 || argc > 3)
+        luaL_error(state, "Usage: df.readFields(container[, options[, out]])");
+    lua_settop(state, 3);
     if (!lua_isnil(state, 2) && !lua_istable(state, 2))
         luaL_error(state, "df.readFields: options must be a table");
     read_check_out(state, 3);
-    read_check_ranges(state, 4);
     luaL_checkstack(state, 20, "df.readFields");
 
     ReadFrom from = read_from(state, 1);
@@ -3369,10 +3338,10 @@ static int meta_read_fields(lua_State *state)
         lua_rawgeti(state, 1, 1);
     else
         lua_pushvalue(state, 1);
-    // stack: [container, options, out, ranges, first]
-    read_setup(state, plan, 5, 2, from == READ_LIST);
-    // stack: [container, options, out, ranges, first, test, each]
-    return read_run(state, plan, 1, from == READ_LIST, 3, 6, 7, true, lua_isnil(state, 4) ? 0 : 4);
+    // stack: [container, options, out, first]
+    read_setup(state, plan, 4, 2, from == READ_LIST);
+    // stack: [container, options, out, first, test, each]
+    return read_run(state, plan, 1, from == READ_LIST, 3, 5, 6, true);
 }
 
 static int read_plan_gc(lua_State *state)
@@ -3385,11 +3354,10 @@ static int read_plan_gc(lua_State *state)
 static int read_prepared_call(lua_State *state)
 {
     int argc = lua_gettop(state);
-    if (argc < 1 || argc > 3)
-        luaL_error(state, "Usage: read(container[, out[, ranges]]), with read made by df.prepareReadFields");
-    lua_settop(state, 3);
+    if (argc < 1 || argc > 2)
+        luaL_error(state, "Usage: read(container[, out]), with read made by df.prepareReadFields");
+    lua_settop(state, 2);
     read_check_out(state, 2);
-    read_check_ranges(state, 3);
     luaL_checkstack(state, 20, "df.readFields");
 
     ReadFrom from = read_from(state, 1);
@@ -3403,8 +3371,8 @@ static int read_prepared_call(lua_State *state)
     auto plan = (const ReadPlan*)lua_touserdata(state, lua_upvalueindex(2));
     lua_pushvalue(state, lua_upvalueindex(3));
     lua_pushvalue(state, lua_upvalueindex(4));
-    // stack: [container, out, ranges, test, each]
-    return read_run(state, *plan, 1, from == READ_LIST, 2, 4, 5, false, lua_isnil(state, 3) ? 0 : 3);
+    // stack: [container, out, test, each]
+    return read_run(state, *plan, 1, from == READ_LIST, 2, 3, 4, false);
 }
 
 static int meta_prepare_read_fields(lua_State *state)

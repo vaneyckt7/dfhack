@@ -942,10 +942,8 @@ function test.range_on_a_vector()
         end})
         expect.table_eq(seen, {2, 3})
 
-        -- a single container, with the range given on its own
-        local out, n = df.readFields(items, {fields={'_index'}}, nil, {{1, 2}})
-        expect.table_eq(column(out, '_index', n), {1, 2})
-        out, n = df.readFields(items, {fields={'_index'}}, {}, {{4, 9}})
+        -- a range that runs past the end
+        local out, n = df.readFields({items=items, _range={4, 9}}, {fields={'_index'}}, {})
         expect.table_eq(column(out, '_index', n), {4})
 
         -- the range is only a part of the reading: the name '_range' is not a container
@@ -1032,8 +1030,8 @@ end
 function test.range_in_lists()
     with_block(function(a)
         with_block(function(b)
-            local function read(items, ranges)
-                local out, n = df.readFields(items, {fields={'_from', '_index'}}, nil, ranges)
+            local function read(items)
+                local out, n = df.readFields(items, {fields={'_from', '_index'}})
                 return column(out, '_from', n), column(out, '_index', n)
             end
 
@@ -1060,22 +1058,6 @@ function test.range_in_lists()
             expect.eq(from[256], 1)
             expect.eq(from[257], 2)
             expect.eq(index[257], 3)
-
-            -- ranges given apart from the items, by place
-            from, index = read({a.designation, b.designation, a.designation}, {{0, 0, 0, 0}, {15, 15, 15, 15}, {3, 3, 3, 4}})
-            expect.table_eq(from, {1, 2, 3, 3})
-            expect.table_eq(index, {0, 255, 3 * 16 + 3, 3 * 16 + 4})
-
-            -- a place without a range reads everything
-            from, index = read({a.designation, b.designation}, {nil, {1, 1, 0, 0}})
-            expect.eq(#from, 257)
-            expect.eq(from[257], 2)
-            expect.eq(index[257], 16)
-
-            -- ranges of named containers, and in a list of ranges, on the same read
-            from, index = read({{des=a.designation, _range={0, 0, 0, 0}}, {des=b.designation}}, {nil, {2, 2, 0, 1}})
-            expect.table_eq(from, {1, 2, 2})
-            expect.table_eq(index, {0, 32, 33})
 
             -- an empty range in the middle
             from, index = read{
@@ -1115,27 +1097,12 @@ function test.range_with_prepared_reads()
             expect.table_eq(column(out, '_from', n), {2, 3})
             expect.table_eq(column(out, '_index', n), {1 * 16 + 3, 8 * 16 + 8})
 
-            -- the same prepared read with the ranges apart from the containers
-            local plain = df.prepareReadFields(a.designation,
-                {fields={'_from', '_index'}, where={{'flow_size', '>', 0}}})
-            out, n = plain(a.designation, nil, {{0, 15, 0, 15}})
-            expect.table_eq(column(out, '_index', n), {1 * 16 + 2, 8 * 16 + 8})
-            out, n = plain(a.designation, nil, {{2, 15, 0, 15}})
-            expect.table_eq(column(out, '_index', n), {8 * 16 + 8})
-            out, n = plain(a.designation, nil, {{0, 15, 3, 15}})
-            expect.table_eq(column(out, '_index', n), {8 * 16 + 8})
-            out, n = plain({a.designation, b.designation}, nil, {{0, 1, 0, 15}, {1, 1, 0, 15}})
-            expect.table_eq(column(out, '_from', n), {1, 2})
-            expect.table_eq(column(out, '_index', n), {1 * 16 + 2, 1 * 16 + 3})
-            out, n = plain({a.designation, b.designation})
-            expect.eq(n, 3)
-
             -- the reuse of the output table works with ranges
             local keep = {}
-            out, n = plain(a.designation, keep, {{0, 15, 0, 15}})
+            out, n = read({des=a.designation, _range={0, 15, 0, 15}}, keep)
             expect.eq(out, keep)
             expect.eq(n, 2)
-            out, n = plain(a.designation, keep, {{0, 0, 0, 0}})
+            out, n = read({des=a.designation, _range={0, 0, 0, 0}}, keep)
             expect.eq(n, 0)
         end)
     end)
@@ -1168,33 +1135,20 @@ function test.range_errors()
                 expect.error_match('whole numbers', range({df.NULL, 2}))
             expect.error_match('container of containers', range({0, 1, 0, 1}))
 
-            expect.error_match('ranges must be a table', function() df.readFields(items, {}, nil, 5) end)
-            expect.error_match('ranges must be a table', function() df.readFields(items, {}, nil, 'a') end)
-            expect.error_match('range must be a table', function() df.readFields(items, {}, nil, {5}) end)
-            expect.error_match('range must be a table', function() df.readFields(items, {}, nil, {{1}}) end)
-            expect.error_match('whole numbers', function() df.readFields(items, {}, nil, {{0.5, 1}}) end)
-            expect.error_match('container of containers', function() df.readFields(items, {}, nil, {{0, 1, 0, 1}}) end)
-            expect.error_match('Usage', function() df.readFields(items, {}, nil, {}, {}) end)
-            expect.error_match('both', function()
-                df.readFields({items=items, _range={0, 1}}, {}, nil, {{0, 1}})
-            end)
-            expect.error_match('both', function()
-                df.readFields({{items=items}, {items=items, _range={0, 1}}}, {}, nil, {nil, {0, 1}})
-            end)
+            -- there is no other way to give a range
+            expect.error_match('Usage', function() df.readFields(items, {}, nil, {{0, 1}}) end)
 
             -- a bad range anywhere in a list is an error, whatever comes before it
             expect.error_match('range must be a table', function()
                 df.readFields({{des=block.designation}, {des=block.designation, _range={1}}})
             end)
             expect.error_match('whole numbers', function()
-                df.readFields({block.designation, block.designation}, nil, nil, {{0, 1, 0, 1}, {0.5, 1, 0, 1}})
+                df.readFields({{des=block.designation, _range={0, 1, 0, 1}}, {des=block.designation, _range={0.5, 1, 0, 1}}})
             end)
 
             local read = df.prepareReadFields({items=items}, {fields={'_index'}})
             expect.error_match('range must be a table', function() read({items=items, _range={1}}) end)
-            expect.error_match('ranges must be a table', function() read({items=items}, nil, 5) end)
-            expect.error_match('Usage', function() read({items=items}, nil, {}, {}) end)
-            expect.error_match('both', function() read({items=items, _range={0, 1}}, nil, {{0, 1}}) end)
+            expect.error_match('Usage', function() read({items=items}, nil, {{0, 1}}) end)
 
             -- nothing was left on the stack or half-done: reads still work
             local out, n = read({items=items, _range={1, 2}})
@@ -1261,9 +1215,6 @@ function test.lists_of_objects()
         expect.error_match('entry 2 of the list is not a material', function() df.readFields({a, 5}) end)
         expect.error_match('entry 2 of the list is not a material', function()
             with_job(function(job) df.readFields({a, job}) end)
-        end)
-        expect.error_match('ranges can only be given for containers', function()
-            df.readFields({a, b}, nil, nil, {{0, 1}})
         end)
         expect.error_match('not a container', function() df.readFields(a) end)
     end)
@@ -1341,7 +1292,6 @@ function test.linked_lists()
             expect.table_eq(column(out, 'completion_timer', n), {20, 40})
             expect.error_match('set up for a linked list', function() read(jobs[1]) end)
             expect.error_match('set up for a linked list', function() read({head}) end)
-            expect.error_match('ranges can only be given for containers', function() read(head, nil, {{0, 1}}) end)
 
             -- an empty list
             links[1].item = nil
@@ -1373,7 +1323,7 @@ function test.limit()
         expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1, 2, 2})
         out, n = df.readFields({items, items}, {fields={'_from'}, limit=5})
         expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1})
-        out, n = df.readFields(items, {fields={'_index'}, limit=2}, nil, {{1, 4}})
+        out, n = df.readFields({items=items, _range={1, 4}}, {fields={'_index'}, limit=2})
         expect.table_eq(column(out, '_index', n), {1, 2})
 
         local read = df.prepareReadFields(items, {fields={'_index'}, limit=2})
@@ -1822,8 +1772,8 @@ function test.each()
 
         -- over a list of containers, with the place in it
         got = {}
-        df.readFields({items, items}, {fields={'_from', '_index'},
-            each=function(from, index) got[#got + 1] = from * 10 + index end}, nil, {{0, 0}, {1, 2}})
+        df.readFields({{items=items, _range={0, 0}}, {items=items, _range={1, 2}}}, {fields={'_from', '_index'},
+            each=function(from, index) got[#got + 1] = from * 10 + index end})
         expect.table_eq(got, {10, 21, 22})
 
         -- prepared

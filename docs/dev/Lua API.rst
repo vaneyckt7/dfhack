@@ -457,7 +457,7 @@ The ``df`` table itself contains the following functions and values:
 
   Returns *nil* if NULL, or a ref.
 
-* ``df.readFields(container[, options[, out[, ranges]]])``
+* ``df.readFields(container[, options[, out]])``
 
   Reads chosen fields from every entry of a container into flat Lua arrays in
   one call, which is much faster than indexing each entry from Lua. This
@@ -521,15 +521,9 @@ The ``df`` table itself contains the following functions and values:
          {des=block_b.designation, tt=block_b.tiletype, _range={0, 15, 10, 15}}},
         {fields={'_from', '_index', 'des.flow_size'}, where={{'tt.shape', '==', df.tiletype_shape.FLOOR}}})
 
-  Ranges can also be passed in ``ranges`` (the fourth argument), a list that
-  has the range of the first item at 1, that of the second at 2, and so on,
-  with *nil* for an item that has none. This is for containers that are not
-  inside a table, and for one container, whose range is then ``ranges[1]``::
-
-    local out, n = df.readFields({block_a.designation, block_b.designation},
-        {fields={'_index', 'flow_size'}}, nil, {{2, 4, 3, 5}, {0, 15, 10, 15}})
-
-  An item that has a range in both ways is an error. When the containers of a
+  A container that is passed on its own, without a name, cannot have a range:
+  give it a name, as in ``{des=block.designation, _range={2, 4, 3, 5}}``, and
+  write the fields with that name (``des.flow_size``). When the containers of a
   table are read side by side, a range needs them to be arranged the same way
   (all 16x16, say).
 
@@ -702,10 +696,10 @@ The ``df`` table itself contains the following functions and values:
 
   Sets up a read once, for code that does the same read again and again.
   Takes what ``df.readFields`` (above) takes, and returns a function
-  ``read(container[, out[, ranges]])`` that does that read on any container,
+  ``read(container[, out])`` that does that read on any container,
   table of named containers, or list of them, of the same kind as the one
-  given here, and returns ``out, n`` in the same way. The ranges, whether in
-  ``_range`` or in ``ranges``, are not part of the setup and can be different
+  given here, and returns ``out, n`` in the same way. The ranges in ``_range``
+  are not part of the setup and can be different
   on every call. The options are taken in when the
   read is set up; changing the options table afterwards has no effect on it.
   The container passed here only shows what kind of container will be read.
