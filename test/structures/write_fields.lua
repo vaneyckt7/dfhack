@@ -96,9 +96,13 @@ function test.nested_arrays_are_one_run()
         expect.eq(block.designation[0][1].flow_size, 0)
         local out, n = df.read_fields(block.designation, {fields={'_index', 'flow_size'}, where={{'flow_size', '>', 0}}})
         expect.table_eq(out._index, {0, 17, 255})
+        local first, after = block.tiletype[0][0], block.tiletype[1][1]
+        expect.ne(first, df.tiletype.StoneFloor1)
         df.write_fields(block.tiletype, {_index={16}, _value={df.tiletype.StoneFloor1}})
         expect.eq(block.tiletype[1][0], df.tiletype.StoneFloor1)
-        expect.eq(block.tiletype[0][0], 0)
+        expect.eq(block.tiletype[0][0], first)
+        expect.eq(block.tiletype[0][15], first)
+        expect.eq(block.tiletype[1][1], after)
     end)
 end
 
