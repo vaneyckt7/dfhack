@@ -1230,6 +1230,14 @@ function test.lists_of_objects()
         expect.table_eq(column(out, '_from', n), {1, 1})
         expect.table_eq(column(out, 'id', n), {'IRON', 'IRONWOOD'})
 
+        -- '_from' is 1 for every object, in a condition as well, and can be set against a field
+        out, n = df.readFields({a, b}, {where={{'_from', '==', 1}}})
+        expect.eq(n, 2)
+        out, n = df.readFields({a, b}, {where={{'_from', '~=', 1}}})
+        expect.eq(n, 0)
+        out, n = df.readFields({a, b}, {fields={'_index'}, where={{'_index', '>', {field='_from'}}}})
+        expect.table_eq(column(out, '_index', n), {2})
+
         out, n = df.readFields({a, b, a}, {fields={'_index'}, where={{'id', '==', 'IRON'}}})
         expect.table_eq(column(out, '_index', n), {1, 3})
 

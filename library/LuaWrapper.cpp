@@ -840,8 +840,8 @@ struct ReadAccessor {
     const df::bit_container_identity *flags = nullptr;
     int flag = 0;
     const struct_field_info *ref_field = nullptr;   // REF: the field to read, or null to read type
-    std::string call_name;
-    const type_identity *seq_target = nullptr;  // GROUP: what the entries are ids of, when known                          // CALL: the name of the method
+    std::string call_name;                          // CALL: the name of the method
+    const type_identity *seq_target = nullptr;      // GROUP: what the entries are ids of, when known
     const function_identity_base *call = nullptr;   // CALL: the method, called on an object of type
     const type_identity *type = nullptr;
     unsigned bit = 0;
@@ -1638,6 +1638,8 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                 acc.offsets.push_back(0);
                 acc.hops.push_back(ReadHop());
                 cur = field->type;
+                value_target = nullptr;
+                seq_target = nullptr;
                 settle();
                 break;
             case struct_field_info::STATIC_ARRAY:
