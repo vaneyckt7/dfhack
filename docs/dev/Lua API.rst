@@ -656,7 +656,9 @@ The ``df`` table itself contains the following functions and values:
     called for the entry with what the paths in ``args`` read, in that order,
     and the one value it returns is the value of the field or what the
     condition compares. Without ``args`` it is called with the entry itself
-    (``_value``). Any function will do, those of ``dfhack`` as much as one
+    (``_value``); a read of a table of named containers has no single entry,
+    so there ``args`` is needed. ``_index`` and ``_from`` can be among the
+    ``args``. Any function will do, those of ``dfhack`` as much as one
     written in Lua::
 
       -- the citizens that are alive, with their ages
@@ -682,7 +684,8 @@ The ``df`` table itself contains the following functions and values:
     *true* or *false*, and it is an error when the function returns anything
     else; ``any``, ``all`` and ``is_instance`` cannot be applied to a call. Each call goes into Lua once per entry, which costs far more
     than a plain condition though less than indexing the container in a loop;
-    the function must not change the number of entries in the container.
+    the function must not change the number of entries in the container,
+    and the read ends with an error when it does.
 
   ``test``
     A function that is called with the ``_index`` of each entry that passed

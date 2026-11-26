@@ -421,7 +421,7 @@ function test.errors()
         expect.error_match('not a single value', function() df.read_fields(job.items, {where={{'_value', '==', 1}}}) end)
         expect.error_match('no readable attribute', function() df.read_fields(items, {fields={'item_type.nope'}}) end)
         expect.error_match('has no attributes', function() df.read_fields(items, {fields={'quantity.nope'}}) end)
-        expect.error_match('must be a string or', function() df.read_fields(items, {fields={5}}) end)
+        expect.error_match('must be a string, {path=', function() df.read_fields(items, {fields={5}}) end)
         expect.error_match('fields must be a table', function() df.read_fields(items, {fields='quantity'}) end)
         expect.error_match('where must be a table', function() df.read_fields(items, {where='quantity'}) end)
         expect.error_match('list of conditions', function() df.read_fields(items, {where={quantity=3}}) end)
@@ -1061,29 +1061,6 @@ function test.calls()
         end)
 end
 
-function test.calls_on_entries_of_containers()
-    with_materials(function(a, b)
-        local mats = {a, b}
-        -- an argument that cannot be reached: the function is not called
-        local calls = 0
-        local function count(v) calls = calls + 1 return v end
-        local out, n = df.read_fields(mats, {fields={{call=count, args={'reaction_product.item_type.0'}, as='first'}}})
-        expect.eq(n, 2)
-        expect.eq(out.first[1], df.item_type.BAR)
-        expect.eq(out.first[2], nil)
-        expect.eq(calls, 1)
-
-        -- inside any and all, where the entry is one value of the container
-        local function is_weapon(v) return v == df.item_type.WEAPON end
-        local o, count2 = df.read_fields(mats, {fields={'_index'},
-            where={{'reaction_product.item_type', 'any', {{{call=is_weapon}, '==', true}}}}})
-        expect.table_eq(column(o, '_index', count2), {1})
-        o, count2 = df.read_fields(mats, {fields={'_index'},
-            where={{'reaction_product.item_type', 'all', {{{call=is_weapon}, '==', false}}}}})
-        expect.table_eq(column(o, '_index', count2), {2})
-    end)
-end
-
 function test.range_in_the_wrong_place()
     with_block(function(block)
         local des = block.designation
@@ -1338,6 +1315,68 @@ local function with_materials(fn)
     end
     b.reaction_product.item_type:insert('#', df.item_type.WOOD)
     dfhack.with_finalize(function() a:delete() b:delete() end, fn, a, b)
+end
+
+function test.calls_on_entries_of_containers()
+    with_materials(function(a, b)
+        local mats = {a, b}
+        -- an argument that cannot be reached: the function is not called
+        local calls = 0
+        local function count(v) calls = calls + 1 return v end
+        local out, n = df.read_fields(mats, {fields={{call=count, args={'reaction_product.item_type.1'}, as='second'}}})
+        expect.eq(n, 2)
+        expect.eq(out.second[1], df.item_type.WEAPON)
+        expect.eq(out.second[2], nil)
+        expect.eq(calls, 1)
+        local o0, n0 = df.read_fields(mats, {fields={'_index'},
+            where={{'not', {{call=count, args={'reaction_product.item_type.1'}}, '==', df.item_type.WEAPON}}}})
+        expect.table_eq(column(o0, '_index', n0), {2})
+        expect.eq(calls, 2)
+
+        -- which of several containers the entry is in, handed to the function
+        local va, vb = a.reaction_product.item_type, b.reaction_product.item_type
+        out, n = df.read_fields({va, vb}, {fields={{call=function(from, i, v) return from * 100 + i * 10 + v end,
+                                                    args={'_from', '_index', '_value'}, as='code'}},
+                                           where={{{call=function(from) return from end, args={'_from'}}, '>=', 1}}})
+        expect.table_eq(column(out, 'code', n), {100 + df.item_type.BAR, 110 + df.item_type.WEAPON,
+                                                 120 + df.item_type.ARMOR, 200 + df.item_type.WOOD})
+
+        -- functions that do reads of their own, of the other kind, leave this read where it was
+        local inner = df.prepare_read_fields(vb, {fields={{call=function(v) return v end, as='v'}},
+                                                  where={{{call=function(v) return v end}, '>=', 0}}})
+        local function reads_too(...) inner(vb) return ... end
+        local seen = {}
+        out, n = df.read_fields({va, vb}, {
+            fields={{call=reads_too, as='v'}, '_from'},
+            where={{{call=reads_too}, '>=', 0}, {'_from', '==', 1}, {{call=reads_too, args={'_from'}}, '==', 1}},
+            test=function() inner(vb) return true end,
+            each=function(v, from) inner(vb) seen[#seen + 1] = from * 100 + v end})
+        expect.table_eq(seen, {100 + df.item_type.BAR, 100 + df.item_type.WEAPON, 100 + df.item_type.ARMOR})
+        local outer = df.prepare_read_fields({va, vb}, {
+            fields={{call=function(v) df.read_fields(vb, {fields={{call=reads_too, as='v'}}}) return v end, as='v'},
+                    {call=function(from) return from end, args={'_from'}, as='from'}},
+            test=function() df.read_fields(vb, {fields={{call=reads_too, as='v'}}}) return true end})
+        out, n = outer({va, vb})
+        expect.table_eq(column(out, 'v', n), {df.item_type.BAR, df.item_type.WEAPON, df.item_type.ARMOR, df.item_type.WOOD})
+        expect.table_eq(column(out, 'from', n), {1, 1, 1, 2})
+
+        -- a function that changes the container ends the read
+        expect.error_match('changed size', function()
+            df.read_fields(va, {fields={{call=function(v) va:insert('#', df.item_type.BAR) return v end, as='v'}}})
+        end)
+        expect.error_match('changed size', function()
+            df.read_fields(va, {where={{{call=function(v) va:erase(#va - 1) return v end}, '>=', 0}}})
+        end)
+
+        -- inside any and all, where the entry is one value of the container
+        local function is_weapon(v) return v == df.item_type.WEAPON end
+        local o, count2 = df.read_fields(mats, {fields={'_index'},
+            where={{'reaction_product.item_type', 'any', {{{call=is_weapon}, '==', true}}}}})
+        expect.table_eq(column(o, '_index', count2), {1})
+        o, count2 = df.read_fields(mats, {fields={'_index'},
+            where={{'reaction_product.item_type', 'all', {{{call=is_weapon}, '==', false}}}}})
+        expect.table_eq(column(o, '_index', count2), {2})
+    end)
 end
 
 function test.lists_of_objects()
@@ -1987,9 +2026,9 @@ function test.fields_under_other_names()
         end)
         expect.error_match("must be {path=", function() df.read_fields(items, {fields={{path='quantity'}}}) end)
         expect.error_match("must be {path=", function() df.read_fields(items, {fields={{path='quantity', as='q', x=1}}}) end)
-        expect.error_match("must be {path=", function() df.read_fields(items, {fields={{'quantity', 'q'}}}) end)
+        expect.error_match("must be a string, {path=", function() df.read_fields(items, {fields={{'quantity', 'q'}}}) end)
         expect.error_match("empty name", function() df.read_fields(items, {fields={{path='quantity', as=''}}}) end)
-        expect.error_match("must be a string or", function() df.read_fields(items, {fields={5}}) end)
+        expect.error_match("must be a string, {path=", function() df.read_fields(items, {fields={5}}) end)
     end)
 end
 

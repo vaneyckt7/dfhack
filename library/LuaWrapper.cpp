@@ -1313,6 +1313,8 @@ bool read_step_index(const std::string &part, const enum_identity *index_enum, i
 thread_local lua_Integer read_place = 0;
 // The stack index of the table of the functions the fields and conditions of the read call.
 thread_local int read_calls_idx = 0;
+// How many functions the reads on this thread have called for {call=...}, to notice that one ran.
+thread_local uint64_t read_call_count = 0;
 
 // What a path is compiled for: a field to hand back, a value for a condition to compare, or a run
 // of entries for a condition on any or all of them.
@@ -1883,6 +1885,7 @@ bool read_call(lua_State *state, const ReadAccessor &acc, const std::vector<uint
     // the function may itself read fields
     const int calls_idx = read_calls_idx;
     const lua_Integer place = read_place;
+    read_call_count++;
     lua_call(state, int(acc.call_args.size()), 1);
     read_calls_idx = calls_idx;
     read_place = place;
@@ -2239,9 +2242,9 @@ bool read_native(lua_State *state, const ReadAccessor &acc, const std::vector<ui
 // Pushes exactly one value. Returns false, having pushed nil, when the value could not be reached.
 bool read_push(lua_State *state, const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index)
 {
-    if (acc.kind == ReadAccessor::INDEX)
+    if (acc.kind == ReadAccessor::INDEX || acc.kind == ReadAccessor::FROM)
     {
-        lua_pushinteger(state, index);
+        lua_pushinteger(state, acc.kind == ReadAccessor::INDEX ? index : read_place);
         return true;
     }
     if (acc.kind == ReadAccessor::CALL)
@@ -3269,6 +3272,14 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
     const bool walk = mode == ReadSource::CONTAINER;
     bool full = false;
 
+    // Stops the read when a function that was called changed how many entries a container has.
+    auto changed_size = [&]() {
+        for (size_t i = 0; i < source_count; i++)
+            if (plan.sources[i].dynamic &&
+                plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
+                luaL_error(state, "df.read_fields: a container changed size during the read");
+    };
+
     // Looks at the entry at index, which the cursors are at, and keeps it if it passes.
     auto visit = [&](lua_Integer index) {
         if (walk && !locate())
@@ -3276,7 +3287,20 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
 
         // set for each entry, since a function called for the one before may have done a read too
         read_place = place;
-        if (plan.has_where && !read_test(state, plan, plan.root, bases, index))
+        read_calls_idx = calls_idx;
+        uint64_t calls_seen = read_call_count;
+        const bool passed = !plan.has_where || read_test(state, plan, plan.root, bases, index);
+        if (walk && read_call_count != calls_seen)
+        {
+            calls_seen = read_call_count;
+            // a function called by a condition may have moved or replaced the entry
+            changed_size();
+            for (ReadCursor &cursor : cursors)
+                cursor.item_ok = false;
+            if (passed && !locate())
+                return;
+        }
+        if (!passed)
             return;
 
         if (plan.has_test)
@@ -3287,12 +3311,12 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             lua_call(state, 2, 1);
             bool keep = lua_toboolean(state, -1) != 0;
             lua_pop(state, 1);
+            // the function may have done a read of its own
+            read_place = place;
+            read_calls_idx = calls_idx;
             if (walk)
             {
-                for (size_t i = 0; i < source_count; i++)
-                    if (plan.sources[i].dynamic &&
-                        plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
-                        luaL_error(state, "df.read_fields: a container changed size during the read");
+                changed_size();
                 // the function may have moved or replaced the entry
                 for (ReadCursor &cursor : cursors)
                     cursor.item_ok = false;
@@ -3322,10 +3346,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             // after the last call nothing more is read, so what the function did no longer matters
             if (walk && !full)
             {
-                for (size_t i = 0; i < source_count; i++)
-                    if (plan.sources[i].dynamic &&
-                        plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
-                        luaL_error(state, "df.read_fields: a container changed size during the read");
+                changed_size();
                 for (ReadCursor &cursor : cursors)
                     cursor.item_ok = false;
             }
@@ -3339,6 +3360,16 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             else
                 read_push(state, acc, bases, index);
             lua_rawseti(state, column_base + 1 + int(i), found);
+            if (walk && read_call_count != calls_seen)
+            {
+                calls_seen = read_call_count;
+                // a function called for a field may have moved or replaced the entry
+                changed_size();
+                for (ReadCursor &cursor : cursors)
+                    cursor.item_ok = false;
+                if (!locate())
+                    luaL_error(state, "df.read_fields: an entry was removed during the read");
+            }
         }
         if (plan.limit && found >= plan.limit)
             full = true;
