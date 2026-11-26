@@ -219,11 +219,11 @@ function test.flags_and_unreachable_places()
 end
 
 function test.containers_that_cannot_be_written()
-    local block = df.map_block:new()
-    dfhack.with_finalize(function() block:delete() end, function()
-        -- a bit container is not a run of entries with fields
-        expect.error_match('not a container it can write to', function()
-            df.write_fields(block.designation[0][0], {_value={true}})
+    local mat = df.material:new()
+    dfhack.with_finalize(function() mat:delete() end, function()
+        -- a set of flags is not a run of entries with fields
+        expect.error_match('not a container', function()
+            df.write_fields(mat.flags, {_value={true}})
         end)
     end)
     -- the list of an enum's attribute belongs to the type
