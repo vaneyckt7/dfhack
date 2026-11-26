@@ -1782,3 +1782,61 @@ function test.pointers_compared_with_objects()
             end)
     end)
 end
+
+function test.each()
+    with_job(function(job)
+        local items = job.job_items.elements
+        -- the values of the fields arrive as arguments, entry by entry, and nothing is stored
+        local got = {}
+        local out, n = df.readFields(items, {fields={'_index', 'quantity'}, where={{'quantity', '>', 2}},
+            each=function(index, quantity) got[#got + 1] = index * 100 + quantity end})
+        expect.eq(n, 3)
+        expect.table_eq(got, {3, 207, 305})
+        expect.nil_(out._index)
+        expect.nil_(out.quantity)
+
+        -- arrays of an earlier read are left alone
+        local kept = {quantity={99, 98}}
+        df.readFields(items, {fields={'quantity'}, each=function() end}, kept)
+        expect.table_eq(kept.quantity, {99, 98})
+
+        -- false ends the read, nil does not
+        local seen = 0
+        out, n = df.readFields(items, {fields={'_index'}, each=function(index)
+            seen = seen + 1
+            if index == 1 then return false end
+        end})
+        expect.eq(seen, 2)
+        expect.eq(n, 2)
+
+        -- after test, with limit, and without fields
+        got = {}
+        out, n = df.readFields(items, {fields={'_index'},
+            test=function(index) return index % 2 == 0 end, limit=2,
+            each=function(index) got[#got + 1] = index end})
+        expect.table_eq(got, {0, 2})
+        local calls = 0
+        out, n = df.readFields(items, {each=function(...) calls = calls + select('#', ...) + 1 end})
+        expect.eq(calls, 5)
+
+        -- over a list of containers, with the place in it
+        got = {}
+        df.readFields({items, items}, {fields={'_from', '_index'},
+            each=function(from, index) got[#got + 1] = from * 10 + index end}, nil, {{0, 0}, {1, 2}})
+        expect.table_eq(got, {10, 21, 22})
+
+        -- prepared
+        got = {}
+        local read = df.prepareReadFields(items, {fields={'quantity'}, where={{'quantity', '>=', 5}},
+            each=function(quantity) got[#got + 1] = quantity end})
+        read(items)
+        read(items)
+        expect.table_eq(got, {7, 5, 7, 5})
+
+        -- the entries may be moved, but their number must stay
+        expect.error_match('changed size', function()
+            df.readFields(job.items, {each=function() job.items:insert('#', {new=true}) end})
+        end)
+        expect.error_match('each must be a function', function() df.readFields(items, {each=1}) end)
+    end)
+end

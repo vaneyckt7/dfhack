@@ -960,6 +960,7 @@ struct ReadPlan {
     bool has_where = false;
     size_t root = 0;
     bool has_test = false;
+    bool has_each = false;              // each entry kept is handed to a function, not stored
     // the fields to hand back, and the accessor of each
     std::vector<std::string> names;
     std::vector<size_t> columns;
@@ -2965,6 +2966,8 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
 
     lua_pushnil(state);
     const int test_idx = lua_gettop(state);
+    lua_pushnil(state);
+    const int each_idx = lua_gettop(state);
 
     if (lua_istable(state, options_idx))
     {
@@ -2973,9 +2976,10 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         {
             lua_pop(state, 1);
             const char *key = lua_type(state, -1) == LUA_TSTRING ? lua_tostring(state, -1) : "";
-            if (strcmp(key, "fields") && strcmp(key, "where") && strcmp(key, "test") && strcmp(key, "limit"))
-                luaL_error(state, "df.readFields: unknown option '%s'; the options are fields, where, test "
-                                  "and limit", key);
+            if (strcmp(key, "fields") && strcmp(key, "where") && strcmp(key, "test") && strcmp(key, "limit") &&
+                strcmp(key, "each"))
+                luaL_error(state, "df.readFields: unknown option '%s'; the options are fields, where, test, "
+                                  "limit and each", key);
         }
 
         lua_getfield(state, options_idx, "limit");
@@ -2997,6 +3001,15 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
             plan.has_test = true;
         }
         lua_replace(state, test_idx);
+
+        lua_getfield(state, options_idx, "each");
+        if (!lua_isnil(state, -1))
+        {
+            if (!lua_isfunction(state, -1))
+                luaL_error(state, "df.readFields: each must be a function");
+            plan.has_each = true;
+        }
+        lua_replace(state, each_idx);
 
         lua_getfield(state, options_idx, "where");
         if (!lua_isnil(state, -1))
@@ -3054,12 +3067,13 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
 // up from the first of them a moment ago, so that one need not be looked at again. ranges_idx holds
 // a list of ranges, one for each place, or is 0.
 int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list, int out_idx, int test_idx,
-             bool first_bound, int ranges_idx)
+             int each_idx, bool first_bound, int ranges_idx)
 {
     luaL_checkstack(state, int(plan.names.size()) + 20, "df.readFields: too many fields");
 
-    // one array per field, each at a fixed stack index
+    // one array per field, each at a fixed stack index; none when the entries go to a function
     int column_base = lua_gettop(state);
+    if (!plan.has_each)
     for (const std::string &name : plan.names)
     {
         lua_getfield(state, out_idx, name.c_str());
@@ -3159,6 +3173,34 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
         }
 
         found++;
+        if (plan.has_each)
+        {
+            // the values are all read before the function gets to run and change anything
+            lua_pushvalue(state, each_idx);
+            for (size_t column : plan.columns)
+            {
+                const ReadAccessor &acc = plan.accessors[column];
+                if (acc.kind == ReadAccessor::FROM)
+                    lua_pushinteger(state, place);
+                else
+                    read_push(state, acc, bases, index);
+            }
+            lua_call(state, int(plan.columns.size()), 1);
+            // false, but not nil, stops the read
+            if (lua_isboolean(state, -1) && !lua_toboolean(state, -1))
+                full = true;
+            lua_pop(state, 1);
+            if (walk)
+            {
+                for (size_t i = 0; i < source_count; i++)
+                    if (plan.sources[i].dynamic &&
+                        plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
+                        luaL_error(state, "df.readFields: a container changed size during the read");
+                for (ReadCursor &cursor : cursors)
+                    cursor.item_ok = false;
+            }
+        }
+        else
         for (size_t i = 0; i < plan.columns.size(); i++)
         {
             const ReadAccessor &acc = plan.accessors[plan.columns[i]];
@@ -3267,7 +3309,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
     }
 
     // what an earlier, longer read left behind in the arrays is cleared, up to the first gap
-    for (size_t i = 0; i < plan.columns.size(); i++)
+    for (size_t i = 0; !plan.has_each && i < plan.columns.size(); i++)
     {
         const int column = column_base + 1 + int(i);
         for (lua_Integer at = found + 1; lua_rawgeti(state, column, at) != LUA_TNIL; at++)
@@ -3332,8 +3374,8 @@ static int meta_read_fields(lua_State *state)
         lua_pushvalue(state, 1);
     // stack: [container, options, out, ranges, first]
     read_setup(state, plan, 5, 2, from == READ_LIST);
-    // stack: [container, options, out, ranges, first, test]
-    return read_run(state, plan, 1, from == READ_LIST, 3, 6, true, lua_isnil(state, 4) ? 0 : 4);
+    // stack: [container, options, out, ranges, first, test, each]
+    return read_run(state, plan, 1, from == READ_LIST, 3, 6, 7, true, lua_isnil(state, 4) ? 0 : 4);
 }
 
 static int read_plan_gc(lua_State *state)
@@ -3342,7 +3384,7 @@ static int read_plan_gc(lua_State *state)
     return 0;
 }
 
-// The function df.prepareReadFields returns. Upvalues: the type table, the plan, the test function.
+// The function df.prepareReadFields returns. Upvalues: the type table, the plan, the test function, the each function.
 static int read_prepared_call(lua_State *state)
 {
     int argc = lua_gettop(state);
@@ -3363,8 +3405,9 @@ static int read_prepared_call(lua_State *state)
 
     auto plan = (const ReadPlan*)lua_touserdata(state, lua_upvalueindex(2));
     lua_pushvalue(state, lua_upvalueindex(3));
-    // stack: [container, out, ranges, test]
-    return read_run(state, *plan, 1, from == READ_LIST, 2, 4, false, lua_isnil(state, 3) ? 0 : 3);
+    lua_pushvalue(state, lua_upvalueindex(4));
+    // stack: [container, out, ranges, test, each]
+    return read_run(state, *plan, 1, from == READ_LIST, 2, 4, 5, false, lua_isnil(state, 3) ? 0 : 3);
 }
 
 static int meta_prepare_read_fields(lua_State *state)
@@ -3394,11 +3437,12 @@ static int meta_prepare_read_fields(lua_State *state)
         lua_pushvalue(state, 1);
     // stack: [container, options, plan, first]
     read_setup(state, *plan, 4, 2, from == READ_LIST);
-    // stack: [container, options, plan, first, test]
+    // stack: [container, options, plan, first, test, each]
     lua_pushvalue(state, UPVAL_TYPETABLE);
     lua_pushvalue(state, 3);
     lua_pushvalue(state, 5);
-    lua_pushcclosure(state, read_prepared_call, 3);
+    lua_pushvalue(state, 6);
+    lua_pushcclosure(state, read_prepared_call, 4);
     return 1;
 }
 

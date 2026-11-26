@@ -661,6 +661,27 @@ The ``df`` table itself contains the following functions and values:
     The read stops as soon as it has that many, so ``limit=1`` finds the
     first entry that passes.
 
+  ``each``
+    A function that is called for each entry that is kept, at the moment it
+    is found, with the values of ``fields`` as its arguments, in that order.
+    Nothing is stored in ``out``. Use it to act on entries as they turn up
+    and to stop early: when the function returns *false* (not *nil*), the
+    read ends there. It must not change the number of entries in the
+    container. Filling arrays is faster when all entries are wanted, since
+    this calls into Lua once per entry::
+
+        -- the first idle citizen, without looking at the units after it
+        local found
+        df.readFields(df.global.world.units.active, {
+            fields={'id', 'pos.x', 'pos.y'},
+            where={{'job.current_job', '==', df.NULL}},
+            each=function(id, x, y)
+                if dfhack.units.isCitizen(df.unit.find(id)) then
+                    found = id
+                    return false
+                end
+            end})
+
   Any other key in ``options`` is an error.
 
   Returns ``out, n``. ``n`` is the number of entries returned, and ``out`` is a
