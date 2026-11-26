@@ -1797,8 +1797,24 @@ function test.each()
 
         -- arrays of an earlier read are left alone
         local kept = {quantity={99, 98}}
-        df.readFields(items, {fields={'quantity'}, each=function() end}, kept)
+        df.readFields(items, {fields={'quantity'}, where={{'quantity', '==', 7}}, each=function() end}, kept)
         expect.table_eq(kept.quantity, {99, 98})
+
+        -- a name given twice is passed twice
+        got = {}
+        df.readFields(items, {fields={'quantity', '_index', 'quantity'}, limit=1,
+            each=function(...) got = {...} end})
+        expect.table_eq(got, {3, 0, 3})
+
+        -- the call that ends the read may change the number of entries
+        local path = df.coord_path:new()
+        dfhack.with_finalize(function() path:delete() end, function()
+            for _, v in ipairs{5, 6, 7} do path.x:insert('#', v) end
+            local _, count = df.readFields(path.x, {fields={'_index'}, where={{'_value', '==', 6}},
+                each=function(index) path.x:erase(index) return false end})
+            expect.eq(count, 1)
+            expect.eq(#path.x, 2)
+        end)
 
         -- false ends the read, nil does not
         local seen = 0

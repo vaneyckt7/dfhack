@@ -2894,7 +2894,7 @@ bool read_describe_links(const type_identity *type, ReadSource &src)
 // Sets a read up for what is at first_idx and the options at options_idx. That is a container, a
 // table of named containers, a linked list, or else an object (when it was taken from a list, as
 // from_list says) or a type, both of which set up a read of a list of objects. Pushes the test
-// function, or nil when there is none.
+// function and then the each function, with nil for one there is none of.
 void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx, bool from_list)
 {
     luaL_checkstack(state, 20, "df.readFields");
@@ -3050,7 +3050,8 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
                     luaL_error(state, "df.readFields: field names must be strings");
                 std::string name = lua_tostring(state, -1);
                 lua_pop(state, 1);
-                if (std::find(plan.names.begin(), plan.names.end(), name) == plan.names.end())
+                // a function gets its arguments by position, so a name given twice is passed twice
+                if (plan.has_each || std::find(plan.names.begin(), plan.names.end(), name) == plan.names.end())
                     plan.names.push_back(name);
             }
         }
@@ -3190,7 +3191,8 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             if (lua_isboolean(state, -1) && !lua_toboolean(state, -1))
                 full = true;
             lua_pop(state, 1);
-            if (walk)
+            // after the last call nothing more is read, so what the function did no longer matters
+            if (walk && !full)
             {
                 for (size_t i = 0; i < source_count; i++)
                     if (plan.sources[i].dynamic &&

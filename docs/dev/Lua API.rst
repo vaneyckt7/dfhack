@@ -666,8 +666,9 @@ The ``df`` table itself contains the following functions and values:
     is found, with the values of ``fields`` as its arguments, in that order.
     Nothing is stored in ``out``. Use it to act on entries as they turn up
     and to stop early: when the function returns *false* (not *nil*), the
-    read ends there. It must not change the number of entries in the
-    container. Filling arrays is faster when all entries are wanted, since
+    read ends there. A name given twice in ``fields`` is passed twice. The
+    function must not change the number of entries in the container, except
+    in the call it returns *false* from, and it cannot yield. Filling arrays is faster when all entries are wanted, since
     this calls into Lua once per entry::
 
         -- the first idle citizen, without looking at the units after it
