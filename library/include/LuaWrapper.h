@@ -77,6 +77,8 @@ namespace LuaWrapper {
     constexpr auto DFHACK_IS_INSTANCE_NAME = "DFHack::IsInstance";
     constexpr auto DFHACK_DELETE_NAME = "DFHack::Delete";
     constexpr auto DFHACK_CAST_NAME = "DFHack::Cast";
+    constexpr auto DFHACK_READ_FIELDS_NAME = "DFHack::ReadFields";
+    constexpr auto DFHACK_PREPARE_READ_FIELDS_NAME = "DFHack::PrepareReadFields";
 
     extern LuaToken DFHACK_EMPTY_TABLE_TOKEN;
 
@@ -145,6 +147,12 @@ namespace LuaWrapper {
      * If is_method is true, these use UPVAL_TYPETABLE to save a hash lookup.
      */
     void push_object_internal(lua_State *state, const type_identity *type, void *ptr, bool in_method = true);
+    /**
+     * Push what reading this field of a structure gives in Lua: a value, or a reference for a
+     * field that holds a structure or a container. ptr is the address of the field itself.
+     * Uses UPVAL_TYPETABLE.
+     */
+    void push_field_value(lua_State *state, const struct_field_info *field, void *ptr);
     DFHACK_EXPORT void *get_object_internal(lua_State *state, const type_identity *type, int val_index, bool exact_type, bool in_method = true);
 
     void push_adhoc_pointer(lua_State *state, void *ptr, const type_identity *target);
