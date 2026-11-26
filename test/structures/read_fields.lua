@@ -1829,6 +1829,66 @@ function test.fields_under_other_names()
     end)
 end
 
+function test.ids_in_fixed_arrays_and_small_vectors_followed()
+    -- a fixed array of 32-bit ids, found by id
+    local figures = df.global.world.history.figures
+    local figure = df.historical_figure:new()
+    figure.id = #figures > 0 and figures[#figures - 1].id + 1000 or 1000
+    figure.race = 77
+    local known, unknown = df.relationship_quick_infost:new(), df.relationship_quick_infost:new()
+    for i = 0, 5 do known.hfid[i], unknown.hfid[i] = figure.id + 1, figure.id + 1 end
+    known.hfid[4] = figure.id
+    -- a vector of 16-bit numbers, which are places in a list rather than ids
+    local colors = df.global.world.raws.descriptors.colors
+    local color = df.descriptor_color:new()
+    color.id = 'READ_FIELDS_TEST'
+    figures:insert('#', figure)
+    colors:insert('#', color)
+    local striped, plain = df.descriptor_pattern:new(), df.descriptor_pattern:new()
+    striped.colors:insert('#', -1)
+    striped.colors:insert('#', #colors - 1)
+    plain.colors:insert('#', -1)
+    plain.colors:insert('#', #colors)
+    dfhack.with_finalize(
+        function()
+            figures:erase(#figures - 1)
+            colors:erase(#colors - 1)
+            figure:delete()
+            color:delete()
+            known:delete()
+            unknown:delete()
+            striped:delete()
+            plain:delete()
+        end,
+        function()
+            local infos = {known, unknown}
+            local out, n = df.read_fields(infos, {fields={'hfid.4._target.race', 'hfid.4._target', 'hfid.0._target'}})
+            expect.eq(n, 2)
+            expect.eq(out['hfid.4._target.race'][1], 77)
+            expect.eq(out['hfid.4._target.race'][2], nil)
+            expect.eq(out['hfid.4._target'][1], figure)
+            expect.eq(out['hfid.0._target'][1], nil)
+            local function matching(list, cond)
+                local o, count = df.read_fields(list, {fields={'_index'}, where={cond}})
+                return column(o, '_index', count)
+            end
+            expect.table_eq(matching(infos, {'hfid', 'any', {{'_value._target.race', '==', 77}}}), {1})
+            expect.table_eq(matching(infos, {'hfid', 'all', {{'_value._target.race', '==', 77}}}), {})
+            expect.table_eq(matching(infos, {'hfid.4._target.race', '==', 77}), {1})
+
+            local patterns = {striped, plain}
+            out, n = df.read_fields(patterns, {fields={'colors.1._target.id', 'colors.1._target', 'colors.0._target'}})
+            expect.eq(n, 2)
+            expect.eq(out['colors.1._target.id'][1], 'READ_FIELDS_TEST')
+            expect.eq(out['colors.1._target.id'][2], nil)
+            expect.eq(out['colors.1._target'][1], color)
+            expect.eq(out['colors.0._target'][1], nil)
+            expect.eq(out['colors.0._target'][2], nil)
+            expect.table_eq(matching(patterns, {'colors', 'any', {{'_value._target.id', '==', 'READ_FIELDS_TEST'}}}), {1})
+            expect.table_eq(matching(patterns, {'colors', 'all', {{'_value._target.id', '==', 'READ_FIELDS_TEST'}}}), {})
+        end)
+end
+
 function test.ids_in_vectors_followed_to_their_objects()
     local all = df.global.world.entities.all
     local entity = df.historical_entity:new()
