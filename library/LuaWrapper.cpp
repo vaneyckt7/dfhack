@@ -839,6 +839,7 @@ struct ReadAccessor {
     const df::bit_container_identity *flags = nullptr;
     int flag = 0;
     const struct_field_info *ref_field = nullptr;   // REF: the field to read, or null to read type
+    std::string call_name;                          // CALL: the name of the method
     const function_identity_base *call = nullptr;   // CALL: the method, called on an object of type
     const type_identity *type = nullptr;
     unsigned bit = 0;
@@ -884,6 +885,20 @@ void read_invoke(lua_State *state, const function_identity_base *fn, int base)
     catch (std::exception &e) {
         luaL_error(state, "df.readFields: C++ exception: %s", e.what());
     }
+}
+
+// Calls a method that takes no arguments on the object at ptr, the way Lua code calls it, since the
+// method checks what it is called on against the object's own class. Leaves what it gives back on
+// top of the stack.
+void read_call(lua_State *state, const ReadAccessor &acc, const void *ptr)
+{
+    push_object_internal(state, acc.type, (void*)ptr);
+    lua_getfield(state, -1, acc.call_name.c_str());
+    if (!lua_isfunction(state, -1))
+        luaL_error(state, "df.readFields: cannot call '%s' on %s", acc.call_name.c_str(),
+                   acc.type->getFullName().c_str());
+    lua_insert(state, -2);
+    lua_call(state, 1, 1);
 }
 
 // A condition on a whole number or a flag that lies at a fixed place in an entry, worked out ahead
@@ -1575,6 +1590,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                                       "'all' need", path.c_str());
                 acc.kind = ReadAccessor::CALL;
                 acc.call = fn;
+                acc.call_name = field_name;
                 acc.type = narrowed ? narrowed : cur;
                 done = true;
                 owner = nullptr;
@@ -1916,8 +1932,9 @@ bool read_scalar(lua_State *state, const ReadAccessor &acc, const std::vector<ui
         out.i = read_seq_count(acc.seq, (uint8_t*)ptr);
         break;
     case ReadAccessor::CALL:
-        push_object_internal(state, acc.type, (void*)ptr);
-        read_invoke(state, acc.call, lua_gettop(state));
+    {
+        read_call(state, acc, ptr);
+        const bool nothing = lua_isnil(state, -1);
         read_scalar_from_lua(state, -1, out);
         if (out.kind == ReadScalar::STRING)
         {
@@ -1925,10 +1942,11 @@ bool read_scalar(lua_State *state, const ReadAccessor &acc, const std::vector<ui
             out.own.assign(out.s, out.len);
             out.s = out.own.data();
         }
-        lua_pop(state, 2);
-        if (out.kind == ReadScalar::NIL)
+        lua_pop(state, 1);
+        if (nothing)
             return false;
         break;
+    }
     default:
         return false;
     }
@@ -2258,9 +2276,7 @@ bool read_push(lua_State *state, const ReadAccessor &acc, const std::vector<uint
         LookupInTable(state, read_dynamic_type(acc, ptr), &DFHACK_TYPEID_TABLE_TOKEN);
         break;
     case ReadAccessor::CALL:
-        push_object_internal(state, acc.type, ptr);
-        read_invoke(state, acc.call, lua_gettop(state));
-        lua_remove(state, -2);
+        read_call(state, acc, ptr);
         break;
     case ReadAccessor::REF:
         if (acc.ref_field)
@@ -2554,6 +2570,9 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
         }
         else
         {
+            if (lua_istable(state, -1))
+                luaL_error(state, "df.readFields: the condition on '%s' has no usable value; a table must be "
+                                  "{field='path'}", head.c_str());
             if (ordered ? !(lua_type(state, -1) == LUA_TNUMBER || lua_type(state, -1) == LUA_TSTRING)
                         : lua_isnil(state, -1))
                 luaL_error(state, "df.readFields: the condition on '%s' has no usable value", head.c_str());
@@ -2870,9 +2889,22 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         {
             // objects of classes derived from one class can be read together
             auto root = (const struct_identity*)first_id;
-            if (!is_type && first_id->type() == IDTYPE_CLASS)
-                while (root->getParent())
-                    root = root->getParent();
+            if (!is_type)
+            {
+                // the nearest class that all the objects of the list (at index 1) derive from
+                lua_Integer count = lua_Integer(lua_rawlen(state, 1));
+                for (lua_Integer i = 2; i <= count && root; i++)
+                {
+                    lua_rawgeti(state, 1, i);
+                    auto id = lua_type(state, -1) == LUA_TUSERDATA ? read_peek_identity(state, -1) : nullptr;
+                    lua_pop(state, 1);
+                    while (id && read_is_struct(id) && root && !read_derives(id, root))
+                        root = root->getParent();
+                }
+                // objects with nothing in common are reported when the list is read
+                if (!root)
+                    root = (const struct_identity*)first_id;
+            }
             src.mode = ReadSource::OBJECTS;
             src.leaf = root;
         }

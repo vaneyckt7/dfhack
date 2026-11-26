@@ -1268,6 +1268,13 @@ function test.objects_of_derived_classes()
             end)
             expect.error_match('set up for a list of objects', function() read(worker) end)
 
+            -- one set up from a list takes objects of the nearest class the objects of that list share
+            read = df.prepareReadFields({worker}, {fields={'unit_id'}})
+            expect.error_match('entry 1 of the list is not a general_ref_unit_workerst', function() read({holder}) end)
+            read = df.prepareReadFields({worker, holder}, {fields={'unit_id'}})
+            out, n = read({holder, worker})
+            expect.eq(n, 2)
+
             -- a read set up from a type takes only objects of that type
             read = df.prepareReadFields(df.general_ref_unit_workerst, {fields={'unit_id'}})
             out, n = read({worker})
@@ -1627,6 +1634,8 @@ function test.conditions_on_two_fields()
         expect.table_eq(matching{'reaction_class', '>', {field='has_material_reaction_product'}}, {0})
 
         expect.error_match("no field 'nope'", function() matching{'quantity', '==', {field='nope'}} end)
+        expect.error_match('no usable value', function() matching{'quantity', '~=', {feild='mat_index'}} end)
+        expect.error_match('no usable value', function() matching{'quantity', '==', {}} end)
     end)
 end
 

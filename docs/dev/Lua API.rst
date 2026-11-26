@@ -535,7 +535,8 @@ The ``df`` table itself contains the following functions and values:
 
   Objects that are not in one container can be read too. Pass a list of them,
   for example the units a script has already picked out. They must be
-  structures of one type, or of classes that derive from one class, and
+  structures of one type, or of classes that derive from one class (fields
+  are looked up in the nearest class they all derive from), and
   ``_index`` is then the place of the object in the list, from 1. A list of
   objects cannot have names or ranges::
 
@@ -603,7 +604,7 @@ The ``df`` table itself contains the following functions and values:
 
     - ``==``, ``~=``, ``<``, ``<=``, ``>``, ``>=``. The value may be
       ``{field='path'}`` to compare with another field of the same entry:
-      ``{'stack_size', '<', {field='subtype.stack_size'}}``.
+      ``{'pos.x', '==', {field='path.dest.x'}}``.
     - ``in``, with a list of accepted values, or ``in_keys``, with a table that
       has the accepted values as keys (any key whose value is not false), the
       form in which Lua code usually keeps a set
@@ -648,8 +649,9 @@ The ``df`` table itself contains the following functions and values:
     that take arguments) goes in ``test``.
 
   ``test``
-    A function that is called with the 0-based index of each entry that passed
-    ``where``, and returns whether to keep it. Use it only for checks that
+    A function that is called with the ``_index`` of each entry that passed
+    ``where`` (0-based in a container, the 1-based place in a list of
+    objects), and returns whether to keep it. Use it only for checks that
     ``where`` cannot express, since it is called once per entry. It must not
     change the number of entries in the container.
 
