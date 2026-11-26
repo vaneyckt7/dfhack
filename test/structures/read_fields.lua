@@ -143,6 +143,60 @@ function test.plain_values()
     end)
 end
 
+-- whole numbers and flags are compared without Lua; other values take the general path. Both must agree.
+function test.comparisons_on_whole_numbers()
+    local path = df.coord_path:new()
+    dfhack.with_finalize(function() path:delete() end, function()
+        local values = {5, -2, 9, 0, -32768, 32767, 9}
+        for _, v in ipairs(values) do path.x:insert('#', v) end
+        local function matches(where)
+            local out, n = df.readFields(path.x, {fields={'_index'}, where=where})
+            return column(out, '_index', n)
+        end
+        local function expected(keep)
+            local list = {}
+            for i, v in ipairs(values) do
+                if keep(v, i - 1) then list[#list + 1] = i - 1 end
+            end
+            return list
+        end
+        for _, against in ipairs{-32768, -3, -2, 0, 5, 9, 32767, 100000} do
+            -- the same number as a float is compared by Lua
+            for _, value in ipairs{against, against + 0.0} do
+                expect.table_eq(matches{{'_value', '==', value}}, expected(function(v) return v == against end))
+                expect.table_eq(matches{{'_value', '~=', value}}, expected(function(v) return v ~= against end))
+                expect.table_eq(matches{{'_value', '<', value}}, expected(function(v) return v < against end))
+                expect.table_eq(matches{{'_value', '<=', value}}, expected(function(v) return v <= against end))
+                expect.table_eq(matches{{'_value', '>', value}}, expected(function(v) return v > against end))
+                expect.table_eq(matches{{'_value', '>=', value}}, expected(function(v) return v >= against end))
+            end
+        end
+        expect.table_eq(matches{{'_value', 'in', {9, -2, 9}}}, {1, 2, 6})
+        expect.table_eq(matches{{'_value', 'in', {9.0, -2, 'x'}}}, {1, 2, 6})
+        expect.table_eq(matches{{'_value', 'in', {-32768}}}, {4})
+        expect.table_eq(matches{{'_index', '>=', 5}}, {5, 6})
+        expect.table_eq(matches{{'_index', 'in', {0, 6, 7}}}, {0, 6})
+        expect.table_eq(matches{{'_index', '~=', 3}, {'_value', '<', 1}}, {1, 4})
+        -- a value of another type equals nothing
+        expect.table_eq(matches{{'_value', '==', '5'}}, {})
+        expect.table_eq(matches{{'_value', '==', true}}, {})
+        expect.table_eq(matches{{'_value', '~=', true}}, {0, 1, 2, 3, 4, 5, 6})
+    end)
+    with_job(function(job)
+        local function matches(where)
+            local out, n = df.readFields(job.job_items.elements, {fields={'_index'}, where=where})
+            return column(out, '_index', n)
+        end
+        expect.table_eq(matches{{'flags1.improvable', '==', false}}, {0, 2, 4})
+        expect.table_eq(matches{{'flags1.improvable', '~=', false}}, {1, 3})
+        expect.table_eq(matches{{'flags1.improvable', '~=', true}}, {0, 2, 4})
+        expect.table_eq(matches{{'flags1.improvable', '==', 1}}, {})
+        expect.table_eq(matches{{'flags1.improvable', 'in', {true}}}, {1, 3})
+        expect.table_eq(matches{{'flags1', '~=', 0}}, {1, 3})
+        expect.table_eq(matches{{'flags1', 'in', {0}}}, {0, 2, 4})
+    end)
+end
+
 function test.grids_read_together()
     with_block(function(block)
         block.tiletype[2][3] = df.tiletype.StoneFloor1

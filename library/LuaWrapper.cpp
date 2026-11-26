@@ -772,6 +772,8 @@ struct ReadSource {
 struct ReadAttr {
     const enum_identity *owner;
     const struct_field_info *field;
+    size_t size = 0;                        // of the attribute when Lua reads it as an integer, else 0
+    bool is_signed = false;
 };
 
 // The object at offset in a path's segment must be an instance of cls for the path to go on.
@@ -793,6 +795,12 @@ struct ReadAccessor {
     size_t whole_size = 0;
     std::vector<ReadAttr> attrs;
     std::vector<ReadCheck> checks;
+    // How a condition can read the value without going through Lua: not at all, as an integer, or as
+    // a boolean. value_size and value_signed describe the integer in memory for kind VALUE.
+    enum Native { NOT_NATIVE, NATIVE_INT, NATIVE_BOOL };
+    Native native = NOT_NATIVE;
+    size_t value_size = 0;
+    bool value_signed = false;
 };
 
 struct ReadCond {
@@ -804,6 +812,10 @@ struct ReadCond {
     bool negate = false;
     int value = 0;                          // ordinal while parsing, stack index while reading
     std::vector<size_t> kids;
+    // set when the accessor and the value allow the comparison to be made without Lua
+    bool native = false;
+    int64_t native_value = 0;
+    std::vector<int64_t> native_set;        // sorted, for 'in'
 };
 
 struct ReadPlan {
@@ -932,12 +944,34 @@ void read_add_source(lua_State *state, ReadPlan &plan, int idx, const std::strin
     plan.sources.push_back(src);
 }
 
+// The size in bytes of a value that Lua reads as an integer, or 0 for anything else. Whether it is
+// signed is found by reading all ones through the type's own reader.
+size_t read_integer_size(lua_State *state, const type_identity *type, bool &is_signed)
+{
+    if (type && type->type() == IDTYPE_ENUM)
+        type = ((const enum_identity*)type)->getBaseType();
+    auto number = type ? dynamic_cast<const df::number_identity_base*>(type) : nullptr;
+    if (!number || !number->isInteger())
+        return 0;
+    size_t size = number->byte_size();
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+        return 0;
+    uint8_t ones[8];
+    memset(ones, 0xFF, sizeof(ones));
+    number->lua_read(state, 0, ones);
+    bool integer = lua_isinteger(state, -1) != 0;
+    is_signed = integer && lua_tointeger(state, -1) < 0;
+    lua_pop(state, 1);
+    return integer ? size : 0;
+}
+
 size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path)
 {
     ReadAccessor acc;
     if (path == "_index")
     {
         acc.kind = ReadAccessor::INDEX;
+        acc.native = ReadAccessor::NATIVE_INT;
         plan.accessors.push_back(acc);
         return plan.accessors.size() - 1;
     }
@@ -990,7 +1024,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path)
             auto field = read_find_field(owner->getAttrType(), part);
             if (!field || field->mode != struct_field_info::PRIMITIVE || !field->type || !read_is_value(field->type))
                 luaL_error(state, "df.readFields: no readable attribute '%s' in '%s'", part.c_str(), path.c_str());
-            acc.attrs.push_back(ReadAttr{owner, field});
+            acc.attrs.push_back(ReadAttr{owner, field, 0, false});
             owner = field->type->type() == IDTYPE_ENUM ? (const enum_identity*)field->type : nullptr;
             continue;
         }
@@ -1096,8 +1130,101 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path)
         acc.whole_size = cur->byte_size();
     }
 
+    // Conditions on integers and flags are the common case, and are compared without Lua.
+    bool attrs_native = true;
+    for (ReadAttr &attr : acc.attrs)
+    {
+        attr.size = read_integer_size(state, attr.field->type, attr.is_signed);
+        if (!attr.size)
+            attrs_native = false;
+    }
+    if (acc.kind == ReadAccessor::VALUE)
+        acc.value_size = read_integer_size(state, acc.type, acc.value_signed);
+    if (!attrs_native || (acc.kind == ReadAccessor::VALUE && !acc.value_size))
+        acc.native = ReadAccessor::NOT_NATIVE;
+    else if (acc.kind == ReadAccessor::BIT && acc.bit_size <= 1)
+        acc.native = ReadAccessor::NATIVE_BOOL;
+    else
+        acc.native = ReadAccessor::NATIVE_INT;
+
     plan.accessors.push_back(acc);
     return plan.accessors.size() - 1;
+}
+
+int64_t read_integer_at(const uint8_t *ptr, size_t size, bool is_signed)
+{
+    switch (size)
+    {
+    case 1: return is_signed ? int64_t(*(const int8_t*)ptr) : int64_t(*ptr);
+    case 2: { uint16_t v; memcpy(&v, ptr, 2); return is_signed ? int64_t(int16_t(v)) : int64_t(v); }
+    case 4: { uint32_t v; memcpy(&v, ptr, 4); return is_signed ? int64_t(int32_t(v)) : int64_t(v); }
+    default: { int64_t v; memcpy(&v, ptr, 8); return v; }
+    }
+}
+
+// The value read_push would push, for an accessor that is NATIVE_INT or NATIVE_BOOL. Returns false
+// where read_push would: when the value could not be reached.
+bool read_native(const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index, int64_t &value)
+{
+    if (acc.kind == ReadAccessor::INDEX)
+    {
+        value = index;
+        return true;
+    }
+
+    uint8_t *ptr = bases[acc.source];
+    size_t check = 0;
+    for (size_t i = 0; i < acc.offsets.size(); i++)
+    {
+        if (i > 0)
+            ptr = *(uint8_t**)ptr;
+        if (!ptr)
+            return false;
+        for (; check < acc.checks.size() && acc.checks[check].segment == i; check++)
+            if (!acc.checks[check].cls->is_instance(virtual_ptr(ptr + acc.checks[check].offset)))
+                return false;
+        ptr += acc.offsets[i];
+    }
+
+    switch (acc.kind)
+    {
+    case ReadAccessor::BIT:
+        value = getBitfieldField(ptr, acc.bit, unsigned(acc.bit_size));
+        if (acc.bit_size <= 1)
+            value = value != 0;
+        break;
+    case ReadAccessor::WHOLE:
+    {
+        size_t whole = 0;
+        memcpy(&whole, ptr, std::min(sizeof(whole), acc.whole_size));
+        value = int64_t(lua_Integer(whole));
+        break;
+    }
+    default:
+        value = read_integer_at(ptr, acc.value_size, acc.value_signed);
+    }
+
+    for (const ReadAttr &attr : acc.attrs)
+    {
+        int64_t idx = value;
+        if (auto complex = attr.owner->getComplex())
+        {
+            auto it = complex->value_index_map.find(idx);
+            if (it != complex->value_index_map.end())
+                idx = int64_t(it->second);
+            else
+                idx = attr.owner->getLastItem() + 1;
+        }
+        else
+        {
+            if (idx < attr.owner->getFirstItem() || idx > attr.owner->getLastItem())
+                idx = attr.owner->getLastItem() + 1;
+            idx -= attr.owner->getFirstItem();
+        }
+        auto row = (const uint8_t*)attr.owner->getAttrs() + attr.owner->getAttrType()->byte_size() * size_t(idx);
+        value = read_integer_at(row + attr.field->offset, attr.size, attr.is_signed);
+    }
+    return true;
 }
 
 // Pushes exactly one value. Returns false, having pushed nil, when the value could not be reached.
@@ -1275,6 +1402,37 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
         else if (ordered ? !(lua_type(state, -1) == LUA_TNUMBER || lua_type(state, -1) == LUA_TSTRING)
                          : lua_isnil(state, -1))
             luaL_error(state, "df.readFields: the condition on '%s' has no usable value", head.c_str());
+
+        // Whole numbers and flags are compared without Lua when the value given allows it.
+        ReadAccessor::Native native = plan.accessors[cond.accessor].native;
+        if (cond.kind == ReadCond::IN)
+        {
+            // stack: [set]; the list it was made from is still at the condition's third place
+            lua_rawgeti(state, idx, 3);
+            int count = int(lua_rawlen(state, -1));
+            cond.native = native == ReadAccessor::NATIVE_INT;
+            for (int i = 1; cond.native && i <= count; i++)
+            {
+                lua_rawgeti(state, -1, i);
+                if (lua_isinteger(state, -1))
+                    cond.native_set.push_back(lua_tointeger(state, -1));
+                else
+                    cond.native = false;
+                lua_pop(state, 1);
+            }
+            lua_pop(state, 1);
+            std::sort(cond.native_set.begin(), cond.native_set.end());
+        }
+        else if (native == ReadAccessor::NATIVE_INT && lua_isinteger(state, -1))
+        {
+            cond.native = true;
+            cond.native_value = lua_tointeger(state, -1);
+        }
+        else if (native == ReadAccessor::NATIVE_BOOL && lua_isboolean(state, -1) && !ordered)
+        {
+            cond.native = true;
+            cond.native_value = lua_toboolean(state, -1);
+        }
         cond.value = ++plan.value_count;
         lua_rawseti(state, plan.values_idx, cond.value);
     }
@@ -1302,6 +1460,12 @@ bool read_test(lua_State *state, const ReadPlan &plan, size_t node, const std::v
         return !read_test(state, plan, cond.kids[0], bases, index);
     case ReadCond::IN:
     {
+        if (cond.native)
+        {
+            int64_t value;
+            return read_native(plan.accessors[cond.accessor], bases, index, value) &&
+                   std::binary_search(cond.native_set.begin(), cond.native_set.end(), value);
+        }
         bool found = false;
         if (read_push(state, plan.accessors[cond.accessor], bases, index) && !lua_isnil(state, -1))
         {
@@ -1313,6 +1477,17 @@ bool read_test(lua_State *state, const ReadPlan &plan, size_t node, const std::v
     }
     default:
     {
+        if (cond.native)
+        {
+            int64_t value;
+            if (!read_native(plan.accessors[cond.accessor], bases, index, value))
+                return false;
+            if (cond.op == LUA_OPEQ)
+                return (value == cond.native_value) != cond.negate;
+            if (cond.op == LUA_OPLT)
+                return cond.swap ? cond.native_value < value : value < cond.native_value;
+            return cond.swap ? cond.native_value <= value : value <= cond.native_value;
+        }
         bool result = false;
         if (read_push(state, plan.accessors[cond.accessor], bases, index))
         {
@@ -1465,8 +1640,11 @@ static int meta_read_fields(lua_State *state)
     }
 
     std::vector<uint8_t*> bases(plan.sources.size());
+    // the item last looked up in each container that holds its entries in place, and where it is
+    std::vector<int> item_at(plan.sources.size(), -1);
+    std::vector<uint8_t*> item_ptr(plan.sources.size());
     // Finds where each container keeps this entry. False when one of them holds a null pointer there.
-    auto locate = [&plan, &bases](lua_Integer index) {
+    auto locate = [&plan, &bases, &item_at, &item_ptr](lua_Integer index) {
         bool present = true;
         for (size_t i = 0; i < plan.sources.size(); i++)
         {
@@ -1477,7 +1655,12 @@ static int meta_read_fields(lua_State *state)
                 entry = *(uint8_t**)src.container->raw_item_pointer(&df::identity_traits<void*>::identity, src.ptr, outer);
             else
             {
-                entry = (uint8_t*)src.container->raw_item_pointer(src.item, src.ptr, outer);
+                if (item_at[i] != outer)
+                {
+                    item_ptr[i] = (uint8_t*)src.container->raw_item_pointer(src.item, src.ptr, outer);
+                    item_at[i] = outer;
+                }
+                entry = item_ptr[i];
                 if (entry)
                     entry += size_t(index % src.inner) * src.leaf_size;
                 if (entry && src.leaf_pointers)
@@ -1510,6 +1693,7 @@ static int meta_read_fields(lua_State *state)
                 if (src.dynamic && src.container->raw_item_count(src.ptr) != src.outer)
                     luaL_error(state, "df.readFields: a container changed size during the read");
             // the function may have moved or replaced the entry
+            std::fill(item_at.begin(), item_at.end(), -1);
             if (!keep || !locate(index))
                 continue;
         }
