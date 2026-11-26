@@ -473,6 +473,11 @@ static void read_field(lua_State *state, const struct_field_info *field, void *p
     lua_pushnil(state);
 }
 
+void LuaWrapper::push_field_value(lua_State *state, const struct_field_info *field, void *ptr)
+{
+    read_field(state, field, ptr);
+}
+
 static void field_reference(lua_State *state, const struct_field_info *field, void *ptr)
 {
     switch (field->mode)
