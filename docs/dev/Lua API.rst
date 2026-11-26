@@ -485,6 +485,18 @@ The ``df`` table itself contains the following functions and values:
   An entry is skipped when any of the named containers holds a null pointer
   at that position.
 
+  It may also be a list of containers, or a list of such tables of named
+  containers, to read many of them in one call: for example the same grids of
+  every map block in view. They are read one after the other into the same
+  arrays, and the field ``_from`` tells which one an entry came from. Every
+  item of the list must be of the same kind as the first (the same type of
+  container, and the same names); they need not hold the same number of
+  entries. An empty list reads nothing::
+
+    local out, n = df.readFields(
+        {block_a.flows, block_b.flows},
+        {fields={'_from', 'type', 'density'}, where={{'density', '>', 0}}})
+
   ``options`` is a table that can contain:
 
   ``fields``
@@ -493,7 +505,9 @@ The ``df`` table itself contains the following functions and values:
     which is followed (``item.id``), a flag of a bitfield
     (``flags.DEAD``), or an attribute of an enum value
     (``item_type.caption``). A bitfield named without a flag is read as its
-    whole numeric value. ``_index`` is the 0-based index of the entry, and
+    whole numeric value. ``_index`` is the 0-based index of the entry in its
+    container, ``_from`` is the 1-based place of that container in the list
+    that was passed in (1 when it was not a list), and
     ``_value`` is the entry itself when the container holds plain values.
     Fields that hold containers, arrays or structures cannot be read. When a
     pointer on the path is null, the value is *nil*.
@@ -510,11 +524,23 @@ The ``df`` table itself contains the following functions and values:
     described above and ``comparison`` is one of ``==``, ``~=``, ``<``, ``<=``,
     ``>``, ``>=``, or ``in`` (``value`` is then a list of accepted values).
     Conditions can be combined with ``{'and', c1, c2, ...}``,
-    ``{'or', c1, c2, ...}`` and ``{'not', c}``. A condition fails when a
-    pointer on its field's path is null, when the entry is not of the class
-    that has the field, or when a comparison meets a value of a different type
-    (a flag is a boolean, so compare it with ``true`` or ``false``, not 1). Without ``where``, or with an empty list, every
-    entry passes.
+    ``{'or', c1, c2, ...}`` and ``{'not', c}``. Without ``where``, or with an
+    empty list, every entry passes.
+
+    Values are compared the way Lua compares them: whole and decimal numbers
+    by value, text with text, and values of different types are never equal
+    and never in order (a flag is a boolean, so compare it with ``true`` or
+    ``false``, not 1). Numbers, booleans and text can be compared; a field
+    that holds anything else cannot be used in a condition. A condition
+    fails, whatever its comparison, when a pointer on its field's path is null
+    or when the entry is not of the class that has the field.
+
+    To ask whether a pointer field is null, compare the pointer itself with
+    ``df.NULL``, using ``==`` or ``~=``: ``{'item', '~=', df.NULL}``. This is
+    the only thing a condition can do with a path that ends at a pointer.
+    ``_from`` cannot be used in a condition.
+
+    All conditions are checked inside DFHack, without calling into Lua.
 
   ``test``
     A function that is called with the 0-based index of each entry that passed
@@ -528,6 +554,22 @@ The ``df`` table itself contains the following functions and values:
   already holds are reused. Array entries past ``n`` are not cleared, and
   neither are arrays for fields that this read was not asked for. Without
   ``fields``, only the count is useful.
+
+* ``df.prepareReadFields(container[, options])``
+
+  Sets up a read once, for code that does the same read again and again.
+  Takes what ``df.readFields`` (above) takes, and returns a function
+  ``read(container[, out])`` that does that read on any container, table of
+  named containers, or list of them, of the same kind as the one given here,
+  and returns ``out, n`` in the same way. The options are taken in when the
+  read is set up; changing the options table afterwards has no effect on it.
+  The container passed here only shows what kind of container will be read.
+  Like ``df.readFields``, this function is experimental::
+
+    local read_flows = df.prepareReadFields(block.flows,
+        {fields={'type', 'density'}, where={{'density', '>', 0}}})
+    -- later, as often as needed
+    local out, n = read_flows(other_block.flows, out)
 
 .. _lua-api-table-assignment:
 
