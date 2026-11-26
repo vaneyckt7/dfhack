@@ -483,6 +483,44 @@ function test.null_pointers()
     end)
 end
 
+function test.null_test_behind_a_null_pointer()
+    local handler = df.job_handler:new()
+    local job = df.job:new()
+    local link = df.job_list_link:new()
+    local postings = handler.postings
+    dfhack.with_finalize(
+        function()
+            job.list_link = nil
+            for i = #postings - 1, 0, -1 do
+                postings[i].job = nil
+                postings[i]:delete()
+            end
+            postings:resize(0)
+            link:delete()
+            job:delete()
+            handler:delete()
+        end,
+        function()
+            for _ = 1, 3 do postings:insert('#', {new=true}) end
+            postings[1].job = job
+            postings[2].job = job
+            local function matching(cond)
+                local out, n = df.readFields(postings, {fields={'_index'}, where={cond}})
+                return column(out, '_index', n)
+            end
+            -- entry 0 has no job, so nothing can be said about its job's pointer
+            expect.table_eq(matching{'job.list_link', '==', df.NULL}, {1, 2})
+            expect.table_eq(matching{'job.list_link', '~=', df.NULL}, {})
+            expect.table_eq(matching{'not', {'job.list_link', '==', df.NULL}}, {0})
+            job.list_link = link
+            expect.table_eq(matching{'job.list_link', '==', df.NULL}, {})
+            expect.table_eq(matching{'job.list_link', '~=', df.NULL}, {1, 2})
+            expect.table_eq(matching{'job.list_link.next', '==', df.NULL}, {1, 2})
+            expect.table_eq(matching{'job.list_link.next', '~=', df.NULL}, {})
+            expect.table_eq(matching{'job', '==', df.NULL}, {0})
+        end)
+end
+
 function test.comparisons_on_text()
     with_job(function(job)
         local items = job.job_items.elements
@@ -610,6 +648,51 @@ function test.conditions_on_grids()
         check({{'_index', '>=', 250}, {'t', '<', 253}}, function(_, index) return index >= 250 and index < 253 end)
         check({{'not', {'t', 'in', {1, 2, 3}}}, {'_index', '<', 6}},
               function(_, index) return index < 6 and not (index >= 1 and index <= 3) end)
+
+        -- a flag field that lies across two bytes, with its neighbours set
+        for x = 0, 15 do
+            for y = 0, 15 do
+                local des = block.designation[x][y]
+                des.dig = (x + 2 * y) % 7
+                des.smooth = (x * 3 + y) % 4
+                des.hidden = (x + y) % 2 == 0
+            end
+        end
+        for value = 0, 3 do
+            check({{'des.smooth', '==', value}}, function(des) return des.smooth == value end)
+        end
+        check({{'des.smooth', 'in', {1, 2}}}, function(des) return des.smooth == 1 or des.smooth == 2 end)
+        check({{'des.smooth', '>=', 2}, {'des.hidden', '==', true}},
+              function(des) return des.smooth >= 2 and des.hidden end)
+        check({{'des.dig', '~=', 0}, {'des.smooth', '<', 3}}, function(des) return des.dig ~= 0 and des.smooth < 3 end)
+
+        -- enum attributes of numbers that are in the enum and of numbers that are not
+        local types = {df.tiletype.OpenSpace, df.tiletype.StoneFloor1, 60000, df.tiletype.StoneWall,
+                       df.tiletype._last_item + 1, df.tiletype.Void}
+        for x = 0, 15 do
+            for y = 0, 15 do block.tiletype[x][y] = types[(x * 16 + y) % #types + 1] end
+        end
+        local function check_types(cond, want)
+            local out, n = df.readFields({tt=block.tiletype}, {fields={'_index'}, where={cond}})
+            local expected = {}
+            for index = 0, 255 do
+                if want(df.tiletype.attrs[block.tiletype[index // 16][index % 16]]) then
+                    expected[#expected + 1] = index
+                end
+            end
+            expect.table_eq(column(out, '_index', n), expected)
+        end
+        for _, shape in ipairs{df.tiletype_shape.FLOOR, df.tiletype_shape.WALL, df.tiletype_shape.NONE,
+                               df.tiletype.attrs[60000].shape} do
+            check_types({'tt.shape', '==', shape}, function(attrs) return attrs.shape == shape end)
+            check_types({'tt.shape', '~=', shape}, function(attrs) return attrs.shape ~= shape end)
+        end
+        check_types({'tt.shape', 'in', {df.tiletype_shape.FLOOR, df.tiletype.attrs[60000].shape}},
+                    function(attrs)
+                        return attrs.shape == df.tiletype_shape.FLOOR or attrs.shape == df.tiletype.attrs[60000].shape
+                    end)
+        check_types({'tt.material', '==', df.tiletype.attrs[60000].material},
+                    function(attrs) return attrs.material == df.tiletype.attrs[60000].material end)
     end)
 end
 
@@ -675,6 +758,10 @@ function test.lists_of_containers()
             expect.error_match("no container named", function()
                 df.readFields({{des=block.designation, t=block.temperature_1}, {des=other.designation}})
             end)
+            -- the first table says which names are read; others in later tables are left alone
+            out, n = df.readFields({{des=block.designation}, {des=other.designation, t=other.temperature_1}},
+                                   {fields={'_from'}, where={{'des.flow_size', '>', 0}}})
+            expect.table_eq(column(out, '_from', n), {1, 2})
             expect.error_match('table of named containers', function()
                 df.readFields({{des=block.designation}, other.designation})
             end)
@@ -735,18 +822,26 @@ function test.prepared_reads()
             expect.eq(n, 6)
             expect.eq(calls, 15)
             -- a prepared read can be used from inside its own test function
+            b[4]:delete()
+            b:erase(4)
             local nested = 0
             local outer
-            outer = df.prepareReadFields(a, {test=function(index)
-                if index == 0 and nested < 3 then
-                    nested = nested + 1
-                    local _, inner = outer(b)
-                    expect.eq(inner, 5)
-                end
-                return true
-            end})
+            outer = df.prepareReadFields(a, {fields={'_from', '_index', 'quantity'}, where={{'quantity', '>', 2}},
+                test=function(index)
+                    if nested < 3 then
+                        nested = nested + 1
+                        local inner, count = outer({b, b})
+                        expect.table_eq(column(inner, '_from', count), {1, 1, 1, 2, 2, 2})
+                        expect.table_eq(column(inner, '_index', count), {0, 2, 3, 0, 2, 3})
+                        expect.table_eq(column(inner, 'quantity', count), {3, 50, 5, 3, 50, 5})
+                    end
+                    return true
+                end})
             out, n = outer(a)
-            expect.eq(n, 5)
+            expect.eq(nested, 3)
+            expect.table_eq(column(out, '_from', n), {1, 1, 1})
+            expect.table_eq(column(out, '_index', n), {0, 2, 3})
+            expect.table_eq(column(out, 'quantity', n), {3, 7, 5})
 
             expect.error_match('not of the kind', function() read(job.items) end)
             expect.error_match('expected a container', function() read(5) end)

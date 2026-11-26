@@ -490,8 +490,8 @@ The ``df`` table itself contains the following functions and values:
   every map block in view. They are read one after the other into the same
   arrays, and the field ``_from`` tells which one an entry came from. Every
   item of the list must be of the same kind as the first (the same type of
-  container, and the same names); they need not hold the same number of
-  entries. An empty list reads nothing::
+  container, and the names of the first; other names in later tables are
+  ignored); they need not hold the same number of entries. An empty list reads nothing::
 
     local out, n = df.readFields(
         {block_a.flows, block_b.flows},
