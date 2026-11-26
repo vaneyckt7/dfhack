@@ -753,6 +753,46 @@ The ``df`` table itself contains the following functions and values:
     -- later, as often as needed
     local out, n = read_flows(other_block.flows, out)
 
+* ``df.write_fields(container, columns[, options])``
+
+  Writes values to entries of a container in one call: the counterpart of
+  ``df.read_fields`` (above), taking columns in the shape that function
+  returns them. ``columns`` is a table that has, for each field to write, a
+  list of values under the field's path, and all the lists have the same
+  length. Row ``i`` of every list goes to one entry: the entry whose index,
+  counted from 0, is ``columns._index[i]``. Without an ``_index`` column the
+  lists must have one value for every entry of the container, in order.
+  Returns the number of rows written.
+
+  A path is written as for ``df.read_fields``: ``'flags.hidden'``,
+  ``'pos.x'``, ``'_value'`` for the entries of a container of plain values.
+  It must lead to a single value: a number, a boolean, a string, an enum
+  value, one flag, or a bitfield as a whole. Values are checked as an
+  assignment in Lua checks them. Since the columns are those of a read, the
+  result of a read can be changed and handed back, and a ``where`` in the
+  read decides which entries are written::
+
+    local out = df.read_fields(block.designation,
+        {fields={'_index', 'hidden'}, where={{'hidden', '==', true}}})
+    for i = 1, #out.hidden do out.hidden[i] = false end
+    df.write_fields(block.designation, out)
+
+  ``container`` is one container; nested arrays of fixed size count as one
+  run of entries, as they do for a read. It can also be an object that is
+  not a container but the first of several that lie one after the other,
+  which is what a pointer to an array reads as in Lua. Such a pointer does
+  not know how long the array is, so ``options.count`` must say how many
+  entries there are; writes are kept within them::
+
+    local port = df.global.gps.main_viewport
+    df.write_fields(port.screentexpos_signpost, {_index=places, _value=texpos},
+        {count=port.dim_x * port.dim_y})
+
+  Every ``_index`` is checked before anything is written. An error met
+  later, such as a value of the wrong type, an entry that is a null pointer
+  or a path that cannot be followed for one entry, stops the write and
+  leaves the rows before it written. This function is experimental as well.
+
 .. _lua-api-table-assignment:
 
 Recursive table assignment

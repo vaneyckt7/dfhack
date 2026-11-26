@@ -1313,8 +1313,18 @@ bool read_step_index(const std::string &part, const enum_identity *index_enum, i
 thread_local lua_Integer read_place = 0;
 // The stack index of the table of the functions the fields and conditions of the read call.
 thread_local int read_calls_idx = 0;
-// How many functions the reads on this thread have called for {call=...}, to notice that one ran.
-thread_local uint64_t read_call_count = 0;
+// The same while a read is being set up. It is kept apart because setting up can run Lua code, the
+// __index of an options table, and that code may do a whole read of its own.
+thread_local int read_setup_calls_idx = 0;
+// What a function called in the middle of a read is followed by: refresh finds the entry being read
+// again, since the function may have moved or replaced it, and returns false when it is gone. The
+// entries of an any or all have a frame of their own, whose parent is the one around it.
+struct ReadFrame {
+    ReadFrame *parent = nullptr;
+    bool (*refresh)(ReadFrame*) = nullptr;
+    void *ctx = nullptr;
+};
+thread_local ReadFrame *read_frame = nullptr;
 
 // What a path is compiled for: a field to hand back, a value for a condition to compare, or a run
 // of entries for a condition on any or all of them.
@@ -1885,10 +1895,15 @@ bool read_call(lua_State *state, const ReadAccessor &acc, const std::vector<uint
     // the function may itself read fields
     const int calls_idx = read_calls_idx;
     const lua_Integer place = read_place;
-    read_call_count++;
+    ReadFrame *const frame = read_frame;
     lua_call(state, int(acc.call_args.size()), 1);
     read_calls_idx = calls_idx;
     read_place = place;
+    read_frame = frame;
+    // the function may have moved, replaced or removed what is being read, so it is found again
+    // before anything else is read from it
+    if (frame && frame->refresh && !frame->refresh(frame))
+        luaL_error(state, "df.read_fields: an entry was removed during the read");
     return true;
 }
 
@@ -2399,8 +2414,8 @@ size_t read_compile_call(lua_State *state, ReadPlan &plan, int spec_idx, bool al
     lua_getfield(state, spec_idx, "call");
     if (!lua_isfunction(state, -1))
         luaL_error(state, "df.read_fields: 'call' must be a function");
-    acc.call = int(lua_rawlen(state, read_calls_idx)) + 1;
-    lua_rawseti(state, read_calls_idx, acc.call);
+    acc.call = int(lua_rawlen(state, read_setup_calls_idx)) + 1;
+    lua_rawseti(state, read_setup_calls_idx, acc.call);
 
     lua_getfield(state, spec_idx, "args");
     if (lua_isnil(state, -1))
@@ -2776,13 +2791,40 @@ bool read_test(lua_State *state, const ReadPlan &plan, size_t node, const std::v
         const bool any = cond.kind == ReadCond::ANY;
         std::vector<uint8_t*> entry(1);
         int count = read_seq_count(acc.seq, ptr);
-        for (int i = 0; i < count; i++)
+        int i = 0;
+        // After a function was called for one of the entries: finds the entry again.
+        struct Inner {
+            lua_State *state; const ReadAccessor &acc; const std::vector<uint8_t*> &bases;
+            std::vector<uint8_t*> &entry; uint8_t *&ptr; int &count; int &i;
+        } inner{state, acc, bases, entry, ptr, count, i};
+        ReadFrame frame;
+        frame.parent = read_frame;
+        frame.ctx = &inner;
+        frame.refresh = [](ReadFrame *self) {
+            if (self->parent && self->parent->refresh && !self->parent->refresh(self->parent))
+                return false;
+            Inner &in = *(Inner*)self->ctx;
+            in.ptr = read_reach(in.state, in.acc, in.bases);
+            if (!in.ptr)
+                return false;
+            if (read_seq_count(in.acc.seq, in.ptr) != in.count)
+                luaL_error(in.state, "df.read_fields: a container changed size during the read");
+            in.entry[0] = read_seq_entry(in.acc.seq, in.ptr, in.i);
+            return in.entry[0] != nullptr;
+        };
+        bool result = !any;
+        read_frame = &frame;
+        for (; i < count; i++)
         {
             entry[0] = read_seq_entry(acc.seq, ptr, i);
             if (entry[0] && read_test(state, sub, sub.root, entry, i) == any)
-                return any;
+            {
+                result = any;
+                break;
+            }
         }
-        return !any;
+        read_frame = frame.parent;
+        return result;
     }
     case ReadCond::IN:
     {
@@ -3029,7 +3071,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
     lua_pushnil(state);
     const int each_idx = lua_gettop(state);
     lua_newtable(state);
-    read_calls_idx = lua_gettop(state);
+    read_setup_calls_idx = lua_gettop(state);
 
     if (lua_istable(state, options_idx))
     {
@@ -3280,6 +3322,20 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
                 luaL_error(state, "df.read_fields: a container changed size during the read");
     };
 
+    // What a function called for an entry is followed by: the entry is found again, since the
+    // function may have moved or replaced it. False when it is no longer there.
+    auto refresh = [&]() {
+        changed_size();
+        for (ReadCursor &cursor : cursors)
+            cursor.item_ok = false;
+        return locate();
+    };
+    using Refresh = decltype(refresh);
+    ReadFrame frame;
+    frame.ctx = &refresh;
+    if (walk)
+        frame.refresh = [](ReadFrame *self) { return (*(Refresh*)self->ctx)(); };
+
     // Looks at the entry at index, which the cursors are at, and keeps it if it passes.
     auto visit = [&](lua_Integer index) {
         if (walk && !locate())
@@ -3288,19 +3344,8 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
         // set for each entry, since a function called for the one before may have done a read too
         read_place = place;
         read_calls_idx = calls_idx;
-        uint64_t calls_seen = read_call_count;
-        const bool passed = !plan.has_where || read_test(state, plan, plan.root, bases, index);
-        if (walk && read_call_count != calls_seen)
-        {
-            calls_seen = read_call_count;
-            // a function called by a condition may have moved or replaced the entry
-            changed_size();
-            for (ReadCursor &cursor : cursors)
-                cursor.item_ok = false;
-            if (passed && !locate())
-                return;
-        }
-        if (!passed)
+        read_frame = &frame;
+        if (plan.has_where && !read_test(state, plan, plan.root, bases, index))
             return;
 
         if (plan.has_test)
@@ -3314,6 +3359,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             // the function may have done a read of its own
             read_place = place;
             read_calls_idx = calls_idx;
+            read_frame = &frame;
             if (walk)
             {
                 changed_size();
@@ -3360,16 +3406,6 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             else
                 read_push(state, acc, bases, index);
             lua_rawseti(state, column_base + 1 + int(i), found);
-            if (walk && read_call_count != calls_seen)
-            {
-                calls_seen = read_call_count;
-                // a function called for a field may have moved or replaced the entry
-                changed_size();
-                for (ReadCursor &cursor : cursors)
-                    cursor.item_ok = false;
-                if (!locate())
-                    luaL_error(state, "df.read_fields: an entry was removed during the read");
-            }
         }
         if (plan.limit && found >= plan.limit)
             full = true;
@@ -3526,6 +3562,244 @@ static int meta_read_fields(lua_State *state)
     read_setup(state, plan, 4, 2, from == READ_LIST);
     // stack: [container, options, out, first, test, each, calls]
     return read_run(state, plan, 1, from == READ_LIST, 3, 5, 6, 7, true);
+}
+
+/**
+ * df.write_fields: write columns of values, as df.read_fields gives them, to entries of a container
+ * in one call.
+ */
+namespace {
+
+struct WriteColumn {
+    size_t accessor = 0;
+    int list = 0;                           // stack index of the list of values
+    int name = 0;                           // and of the name of the column
+};
+
+// Sets the read up far enough to make sense of the paths of the columns. Runs protected, so that
+// what the path code has to say can be reported under the name of df.write_fields.
+int write_compile(lua_State *state)
+{
+    // stack: [plan, path]
+    auto plan = (ReadPlan*)lua_touserdata(state, 1);
+    size_t len;
+    const char *path = lua_tolstring(state, 2, &len);
+    lua_pushinteger(state, lua_Integer(read_compile(state, *plan, std::string(path, len))));
+    return 1;
+}
+
+}
+
+static int meta_write_fields(lua_State *state)
+{
+    static const char *const usage = "Usage: df.write_fields(container, columns[, options])";
+    int argc = lua_gettop(state);
+    if (argc < 2 || argc > 3)
+        luaL_error(state, usage);
+    lua_settop(state, 3);
+    if (!lua_istable(state, 2))
+        luaL_error(state, "df.write_fields: columns must be a table of lists, one for each field");
+    if (!lua_isnil(state, 3) && !lua_istable(state, 3))
+        luaL_error(state, "df.write_fields: options must be a table");
+    if (lua_type(state, 1) != LUA_TUSERDATA)
+        luaL_error(state, "df.write_fields: expected a container");
+
+    // 'count' makes a run of entries of an object that is not a container: the first of that many
+    // entries that lie one after the other, which is what a pointer to an array gives
+    lua_Integer run = -1;
+    if (lua_istable(state, 3))
+    {
+        lua_pushnil(state);
+        while (lua_next(state, 3))
+        {
+            if (lua_type(state, -2) != LUA_TSTRING || strcmp(lua_tostring(state, -2), "count") != 0)
+                luaL_error(state, "df.write_fields: the only option is 'count'");
+            if (!lua_isinteger(state, -1) || lua_tointeger(state, -1) < 0 || lua_tointeger(state, -1) > INT_MAX)
+                luaL_error(state, "df.write_fields: 'count' must be a whole number that is not negative");
+            run = lua_tointeger(state, -1);
+            lua_pop(state, 1);
+        }
+    }
+
+    ReadPlan plan;
+    {
+        ReadSource src;
+        auto id = get_object_identity(state, 1, "df.write_fields()", false, true);
+        lua_pop(state, 1);
+        if (id->isContainer())
+        {
+            if (run >= 0)
+                luaL_error(state, "df.write_fields: 'count' is for an object that is not a container; a "
+                                  "container knows how many entries it has");
+            if (id->type() == IDTYPE_BIT_CONTAINER)
+                luaL_error(state, "df.write_fields: %s is not a container it can write to",
+                           id->getFullName().c_str());
+            read_describe_source(state, 1, src);
+        }
+        else
+        {
+            if (run < 0)
+                luaL_error(state, "df.write_fields: %s is not a container; to write to a run of entries "
+                                  "that starts at an object, say how many there are with 'count'",
+                           id->getFullName().c_str());
+            src.item = src.leaf = id;
+            src.ptr = (uint8_t*)get_object_ref(state, 1);
+            src.outer = int(run);
+            src.leaf_size = id->byte_size();
+            if (!src.ptr || !src.leaf_size)
+                luaL_error(state, "df.write_fields: cannot write to a run of %s", id->getFullName().c_str());
+        }
+        plan.sources.push_back(src);
+    }
+    const ReadSource &src = plan.sources[0];
+    const lua_Integer total = lua_Integer(src.outer) * src.inner;
+
+    // the columns: '_index' says which entries, every other one is a path and the values for it
+    std::vector<WriteColumn> columns;
+    int indexes = 0;
+    lua_Integer rows = -1;
+    lua_pushnil(state);
+    while (lua_next(state, 2))
+    {
+        // stack: [..., name, list]; both stay where they are while the next pair is looked up
+        if (lua_type(state, -2) != LUA_TSTRING)
+            luaL_error(state, "df.write_fields: columns must be named by the field they are written to");
+        if (!lua_istable(state, -1))
+            luaL_error(state, "df.write_fields: column '%s' must be a list of values", lua_tostring(state, -2));
+        const lua_Integer length = lua_Integer(lua_rawlen(state, -1));
+        if (rows >= 0 && length != rows)
+            luaL_error(state, "df.write_fields: the columns do not have the same number of values");
+        rows = length;
+        luaL_checkstack(state, 8, "df.write_fields: too many columns");
+        if (strcmp(lua_tostring(state, -2), "_index") == 0)
+            indexes = lua_gettop(state);
+        else
+        {
+            WriteColumn column;
+            column.name = lua_gettop(state) - 1;
+            column.list = lua_gettop(state);
+            lua_pushcfunction(state, write_compile);
+            lua_pushlightuserdata(state, &plan);
+            lua_pushvalue(state, column.name);
+            if (lua_pcall(state, 2, 1, 0) != LUA_OK)
+            {
+                if (lua_type(state, -1) == LUA_TSTRING)
+                    luaL_gsub(state, lua_tostring(state, -1), "df.read_fields", "df.write_fields");
+                lua_error(state);
+            }
+            column.accessor = size_t(lua_tointeger(state, -1));
+            lua_pop(state, 1);
+            const ReadAccessor &acc = plan.accessors[column.accessor];
+            const bool can = acc.attrs.empty() &&
+                             ((acc.kind == ReadAccessor::VALUE && acc.type) || acc.kind == ReadAccessor::BIT ||
+                              acc.kind == ReadAccessor::WHOLE || acc.kind == ReadAccessor::FLAG);
+            if (!can)
+                luaL_error(state, "df.write_fields: '%s' is not a value that can be written",
+                           lua_tostring(state, column.name));
+            columns.push_back(column);
+        }
+        // the name is wanted again on top for lua_next
+        lua_pushvalue(state, -2);
+    }
+    if (columns.empty())
+        luaL_error(state, "df.write_fields: no column of values to write");
+    if (!indexes && rows != total)
+        luaL_error(state, "df.write_fields: without an '_index' column the columns must have one value "
+                          "for every entry, %d here", int(total));
+
+    // all the indexes are looked at before anything is written
+    if (indexes)
+        for (lua_Integer row = 1; row <= rows; row++)
+        {
+            lua_rawgeti(state, indexes, row);
+            if (!lua_isinteger(state, -1))
+                luaL_error(state, "df.write_fields: '_index' %d is not a whole number", int(row));
+            const lua_Integer index = lua_tointeger(state, -1);
+            if (index < 0 || index >= total)
+                luaL_error(state, "df.write_fields: '_index' %d is %d, outside the %d entries", int(row),
+                           int(index), int(total));
+            lua_pop(state, 1);
+        }
+
+    std::vector<uint8_t*> bases(1);
+    const int value_idx = lua_gettop(state) + 1;
+    for (lua_Integer row = 1; row <= rows; row++)
+    {
+        lua_Integer index = row - 1;
+        if (indexes)
+        {
+            lua_rawgeti(state, indexes, row);
+            index = lua_tointeger(state, -1);
+            lua_pop(state, 1);
+        }
+
+        uint8_t *entry;
+        if (!src.container)
+            entry = src.ptr + size_t(index) * src.leaf_size;
+        else if (src.pointers)
+            entry = *(uint8_t**)src.container->raw_item_pointer(&df::identity_traits<void*>::identity,
+                                                                src.ptr, int(index));
+        else
+        {
+            entry = (uint8_t*)src.container->raw_item_pointer(src.item, src.ptr, int(index / src.inner));
+            if (entry)
+                entry += size_t(index % src.inner) * src.leaf_size;
+            if (entry && src.leaf_pointers)
+                entry = *(uint8_t**)entry;
+        }
+        if (!entry)
+            luaL_error(state, "df.write_fields: entry %d is a null pointer", int(index));
+        bases[0] = entry;
+
+        for (const WriteColumn &column : columns)
+        {
+            const ReadAccessor &acc = plan.accessors[column.accessor];
+            uint8_t *ptr = read_reach(state, acc, bases);
+            if (!ptr)
+                luaL_error(state, "df.write_fields: entry %d has no '%s' to write to", int(index),
+                           lua_tostring(state, column.name));
+            lua_rawgeti(state, column.list, row);
+            switch (acc.kind)
+            {
+            case ReadAccessor::BIT:
+                if (lua_isboolean(state, value_idx))
+                    setBitfieldField(ptr, acc.bit, unsigned(acc.bit_size), lua_toboolean(state, value_idx));
+                else if (lua_isinteger(state, value_idx))
+                    setBitfieldField(ptr, acc.bit, unsigned(acc.bit_size), int(lua_tointeger(state, value_idx)));
+                else
+                    luaL_error(state, "df.write_fields: '%s' %d must be a boolean or a whole number",
+                               lua_tostring(state, column.name), int(row));
+                break;
+            case ReadAccessor::WHOLE:
+            {
+                if (!lua_isinteger(state, value_idx))
+                    luaL_error(state, "df.write_fields: '%s' %d must be a whole number",
+                               lua_tostring(state, column.name), int(row));
+                size_t whole = size_t(lua_tointeger(state, value_idx));
+                memcpy(ptr, &whole, std::min(sizeof(whole), acc.whole_size));
+                break;
+            }
+            case ReadAccessor::FLAG:
+                if (!lua_isboolean(state, value_idx))
+                    luaL_error(state, "df.write_fields: '%s' %d must be a boolean",
+                               lua_tostring(state, column.name), int(row));
+                {
+                    int count = acc.flags->raw_read_count(ptr);
+                    if (count >= 0 && acc.flag >= count)
+                        luaL_error(state, "df.write_fields: entry %d has no '%s' to write to", int(index),
+                                   lua_tostring(state, column.name));
+                    acc.flags->lua_item_write(state, column.name, ptr, acc.flag, value_idx);
+                }
+                break;
+            default:
+                acc.type->lua_write(state, column.name, ptr, value_idx);
+            }
+            lua_pop(state, 1);
+        }
+    }
+
+    lua_pushinteger(state, rows);
+    return 1;
 }
 
 static int read_plan_gc(lua_State *state)
@@ -4740,6 +5014,13 @@ static int DoAttach(lua_State *state)
     lua_pushcclosure(state, meta_prepare_read_fields, 1);
     lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_PREPARE_READ_FIELDS_NAME);
 
+    // the table is where an error in writing a value looks for the name to report it under
+    lua_newtable(state);
+    lua_pushliteral(state, "df.write_fields");
+    lua_setfield(state, -2, "__metatable");
+    lua_pushcclosure(state, meta_write_fields, 1);
+    lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_WRITE_FIELDS_NAME);
+
     lua_rawgetp(state, LUA_REGISTRYINDEX, &DFHACK_TYPETABLE_TOKEN);
     lua_pushcclosure(state, meta_assign, 1);
     lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_ASSIGN_NAME);
@@ -4780,6 +5061,8 @@ static int DoAttach(lua_State *state)
         lua_setfield(state, -2, "read_fields");
         lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_PREPARE_READ_FIELDS_NAME);
         lua_setfield(state, -2, "prepare_read_fields");
+        lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_WRITE_FIELDS_NAME);
+        lua_setfield(state, -2, "write_fields");
 
         lua_pushlightuserdata(state, NULL);
         lua_setfield(state, -2, "NULL");

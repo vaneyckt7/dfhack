@@ -2140,3 +2140,98 @@ function test.ids_in_vectors_followed_to_their_objects()
             end)
         end)
 end
+
+function test.calls_may_move_entries()
+    local path = df.coord_path:new()
+    dfhack.with_finalize(function() path:delete() end, function()
+        for _, v in ipairs{5, -2, 9, 0} do path.x:insert('#', v) end
+        -- growing and shrinking the vector moves its storage without changing its size
+        local function move(v)
+            for _ = 1, 64 do path.x:insert('#', 0) end
+            path.x:resize(4)
+            return v
+        end
+        -- what is read after the call, in the same entry, is read from where the entries are now
+        local out, n = df.read_fields(path.x, {fields={'_value'},
+            where={{{call=move}, '>=', -100}, {'_value', '>', 0}}})
+        expect.table_eq(column(out, '_value', n), {5, 9})
+        out, n = df.read_fields(path.x, {fields={'_value'}, where={{{call=move}, '==', {field='_value'}}}})
+        expect.table_eq(column(out, '_value', n), {5, -2, 9, 0})
+        out, n = df.read_fields(path.x, {fields={{call=move, as='moved'}, '_value', '_index'}})
+        expect.table_eq(column(out, 'moved', n), {5, -2, 9, 0})
+        expect.table_eq(column(out, '_value', n), {5, -2, 9, 0})
+        local got = {}
+        df.read_fields(path.x, {fields={{call=move, as='moved'}, '_value'},
+            each=function(moved, value) got[#got + 1] = moved * 100 + value end})
+        expect.table_eq(got, {505, -202, 909, 0})
+
+        -- a change of size ends the read before anything more is read or handed on
+        local handed = 0
+        expect.error_match('changed size', function()
+            df.read_fields(path.x, {
+                fields={{call=function(v) path.x:insert('#', 1) return v end, as='v'}, '_value'},
+                each=function() handed = handed + 1 return false end})
+        end)
+        expect.eq(handed, 0)
+        path.x:resize(4)
+        expect.error_match('changed size', function()
+            df.read_fields(path.x, {fields={'_value'},
+                where={{{call=function(v) path.x:insert('#', 1) return v end}, '>=', -100}, {'_value', '>', 0}}})
+        end)
+    end)
+
+    -- a function that takes its own entry away
+    with_job(function(job)
+        local items = job.job_items.elements
+        local removed = items[1]
+        dfhack.with_finalize(function() items[1] = removed end, function()
+            expect.error_match('an entry was removed', function()
+                df.read_fields(items, {fields={
+                    {call=function(index) if index == 1 then items[1] = nil end return index end,
+                     args={'_index'}, as='i'}, 'quantity'}})
+            end)
+            items[1] = removed
+            expect.error_match('an entry was removed', function()
+                df.read_fields(items, {fields={'_index'}, where={
+                    {{call=function(index) if index == 1 then items[1] = nil end return index end,
+                      args={'_index'}}, '>=', 0}}})
+            end)
+        end)
+    end)
+
+    -- inside any and all, the entries the conditions go over are found again as well
+    with_materials(function(a, b)
+        local types = a.reaction_product.item_type
+        local function move(v)
+            for _ = 1, 64 do types:insert('#', 0) end
+            types:resize(3)
+            return v
+        end
+        local out, n = df.read_fields({a, b}, {fields={'id'}, where={
+            {'reaction_product.item_type', 'all', {{{call=move}, '>=', 0}, {'_value', '~=', df.item_type.WOOD}}}}})
+        expect.table_eq(column(out, 'id', n), {'IRON'})
+        out, n = df.read_fields({a, b}, {fields={'id'}, where={
+            {'reaction_product.item_type', 'any', {{{call=move}, '>=', 0}, {'_value', '==', df.item_type.ARMOR}}}}})
+        expect.table_eq(column(out, 'id', n), {'IRON'})
+        expect.error_match('changed size', function()
+            df.read_fields({a, b}, {fields={'id'}, where={
+                {'reaction_product.item_type', 'all',
+                 {{{call=function(v) types:erase(#types - 1) return v end}, '>=', 0}}}}})
+        end)
+    end)
+end
+
+function test.options_that_read_while_a_read_is_set_up()
+    with_materials(function(a)
+        local types = a.reaction_product.item_type
+        local prepared = df.prepare_read_fields(types, {fields={'_value'}})
+        -- looking an option up runs a read that was prepared earlier
+        local options = setmetatable({}, {__index=function(_, key)
+            prepared(types)
+            if key == 'where' then return {{{call=function(v) return v end}, '==', df.item_type.WEAPON}} end
+            if key == 'fields' then return {'_index'} end
+        end})
+        local out, n = df.read_fields(types, options)
+        expect.table_eq(column(out, '_index', n), {1})
+    end)
+end

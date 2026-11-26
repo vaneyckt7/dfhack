@@ -79,6 +79,7 @@ namespace LuaWrapper {
     constexpr auto DFHACK_CAST_NAME = "DFHack::Cast";
     constexpr auto DFHACK_READ_FIELDS_NAME = "DFHack::ReadFields";
     constexpr auto DFHACK_PREPARE_READ_FIELDS_NAME = "DFHack::PrepareReadFields";
+    constexpr auto DFHACK_WRITE_FIELDS_NAME = "DFHack::WriteFields";
 
     extern LuaToken DFHACK_EMPTY_TABLE_TOKEN;
 
