@@ -51,4 +51,5 @@ function test.out_of_range_index()
     expect.true_(df.item_type.attrs[df.item_type._last_item + 1])
     expect.eq(df.item_type.attrs[df.item_type._last_item + 1],
               df.item_type.attrs[df.item_type._last_item + 100])
+    expect.ne(df.item_type.attrs[df.item_type._last_item + 1], df.item_type.attrs[df.item_type._first_item])
 end
