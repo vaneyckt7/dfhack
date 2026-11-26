@@ -952,6 +952,138 @@ function test.range_on_a_vector()
     end)
 end
 
+function test.calls()
+    local coords = {}
+    for i = 1, 4 do
+        coords[i] = df.coord:new()
+        coords[i].x, coords[i].y, coords[i].z = i, 10 * i, -1
+    end
+    dfhack.with_finalize(
+        function() for _, c in ipairs(coords) do c:delete() end end,
+        function()
+            -- a field worked out from the entry itself, and one from what paths read
+            local out, n = df.read_fields(coords, {fields={
+                'x',
+                {call=function(c) return c.x + c.y end, as='sum'},
+                {call=function(x, y) return x * y end, args={'x', 'y'}, as='product'},
+                {call=function(i, x) return i .. ':' .. x end, args={'_index', 'x'}, as='label'},
+                {call=function() return nil end, as='nothing'},
+            }})
+            expect.eq(n, 4)
+            expect.table_eq(column(out, 'sum', n), {11, 22, 33, 44})
+            expect.table_eq(column(out, 'product', n), {10, 40, 90, 160})
+            expect.table_eq(column(out, 'label', n), {'1:1', '2:2', '3:3', '4:4'})
+            expect.eq(out.nothing[1], nil)
+
+            -- in conditions, compared like a field
+            local function matching(...)
+                local o, count = df.read_fields(coords, {fields={'_index'}, where={...}})
+                return column(o, '_index', count)
+            end
+            local function even(x) return x % 2 == 0 end
+            expect.table_eq(matching{{call=even, args={'x'}}, '==', true}, {2, 4})
+            expect.table_eq(matching{{call=even, args={'x'}}, '~=', true}, {1, 3})
+            expect.table_eq(matching{{call=function(c) return c.x + c.y end}, '>', 22}, {3, 4})
+            expect.table_eq(matching{{call=function(c) return c.x + c.y end}, 'in', {11, 44}}, {1, 4})
+            expect.table_eq(matching{{call=function(x) return 'no' .. x end, args={'x'}}, 'endswith', '3'}, {3})
+            expect.table_eq(matching({'x', '>', 1}, {{call=even, args={'x'}}, '==', false}), {3})
+            expect.table_eq(matching{'or', {{call=even, args={'x'}}, '==', true}, {'x', '==', 1}}, {1, 2, 4})
+            -- nothing given back passes no comparison, as a field that cannot be reached
+            expect.table_eq(matching{{call=function() return nil end}, '==', true}, {})
+            expect.table_eq(matching{{call=function() return nil end}, '~=', true}, {})
+            expect.table_eq(matching{'not', {{call=function() return nil end}, '==', true}}, {1, 2, 3, 4})
+
+            -- a function of DFHack's own, given three numbers
+            out, n = df.read_fields(coords, {fields={{call=dfhack.maps.isValidTilePos, args={'x', 'y', 'z'}, as='valid'}}})
+            expect.eq(n, 4)
+            expect.eq(out.valid[1], false)
+
+            -- conditions run before the fields, and only entries that pass are worked out
+            local seen = {}
+            out, n = df.read_fields(coords, {fields={{call=function(x) seen[#seen + 1] = x return x end, args={'x'}, as='x'}},
+                                            where={{'x', '>=', 3}}})
+            expect.table_eq(seen, {3, 4})
+
+            -- handed to 'each' like any field, and a prepared read keeps its functions
+            local got = {}
+            local read = df.prepare_read_fields(coords, {
+                fields={'x', {call=function(c) return c.y end, as='y'}},
+                where={{{call=even, args={'x'}}, '==', true}},
+                each=function(x, y) got[#got + 1] = x + y end})
+            read(coords)
+            collectgarbage()
+            read(coords)
+            expect.table_eq(got, {22, 44, 22, 44})
+
+            -- the function may read fields itself
+            out, n = df.read_fields(coords, {fields={'_index', {call=function(c)
+                local _, inner = df.read_fields(coords, {where={{'x', '<', c.x}}})
+                return inner
+            end, as='smaller'}, '_from'}})
+            expect.table_eq(column(out, 'smaller', n), {0, 1, 2, 3})
+            expect.table_eq(column(out, '_index', n), {1, 2, 3, 4})
+
+            -- what goes wrong in the function comes out of the read
+            expect.error_match('went wrong', function()
+                df.read_fields(coords, {fields={{call=function() error('went wrong') end, as='f'}}})
+            end)
+
+            expect.error_match("'call' must be a function", function()
+                df.read_fields(coords, {fields={{call='isCitizen', as='f'}}})
+            end)
+            expect.error_match('needs as=', function()
+                df.read_fields(coords, {fields={{call=even}}})
+            end)
+            expect.error_match('a call must be', function()
+                df.read_fields(coords, {fields={{call=even, path='x', as='f'}}})
+            end)
+            expect.error_match('a call must be', function()
+                df.read_fields(coords, {where={{{call=even, as='f'}, '==', true}}})
+            end)
+            expect.error_match('list of paths', function()
+                df.read_fields(coords, {fields={{call=even, args='x', as='f'}}})
+            end)
+            expect.error_match('list of paths', function()
+                df.read_fields(coords, {fields={{call=even, args={1}, as='f'}}})
+            end)
+            expect.error_match("no field 'nope'", function()
+                df.read_fields(coords, {fields={{call=even, args={'nope'}, as='f'}}})
+            end)
+            expect.error_match('not a call', function()
+                df.read_fields(coords, {where={{{call=even}, 'any', {{'_value', '==', 1}}}}})
+            end)
+            expect.error_match('two different fields', function()
+                df.read_fields(coords, {fields={'x', {call=even, as='x'}}})
+            end)
+            expect.error_match('returned a table', function()
+                df.read_fields(coords, {where={{{call=function() return {} end}, '==', true}}})
+            end)
+        end)
+end
+
+function test.calls_on_entries_of_containers()
+    with_materials(function(a, b)
+        local mats = {a, b}
+        -- an argument that cannot be reached: the function is not called
+        local calls = 0
+        local function count(v) calls = calls + 1 return v end
+        local out, n = df.read_fields(mats, {fields={{call=count, args={'reaction_product.item_type.0'}, as='first'}}})
+        expect.eq(n, 2)
+        expect.eq(out.first[1], df.item_type.BAR)
+        expect.eq(out.first[2], nil)
+        expect.eq(calls, 1)
+
+        -- inside any and all, where the entry is one value of the container
+        local function is_weapon(v) return v == df.item_type.WEAPON end
+        local o, count2 = df.read_fields(mats, {fields={'_index'},
+            where={{'reaction_product.item_type', 'any', {{{call=is_weapon}, '==', true}}}}})
+        expect.table_eq(column(o, '_index', count2), {1})
+        o, count2 = df.read_fields(mats, {fields={'_index'},
+            where={{'reaction_product.item_type', 'all', {{{call=is_weapon}, '==', false}}}}})
+        expect.table_eq(column(o, '_index', count2), {2})
+    end)
+end
+
 function test.range_in_the_wrong_place()
     with_block(function(block)
         local des = block.designation

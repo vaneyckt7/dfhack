@@ -553,6 +553,7 @@ The ``df`` table itself contains the following functions and values:
     dots. In place of a name, ``{path='des.flow_size', as='flow'}`` reads
     that path and stores it in ``out`` under the other name, here
     ``out.flow``; two different paths cannot be stored under one name. A
+    field can also be worked out by a function, see ``call`` below. A
     step can be:
 
     - a field of a structure (``pos.x``), or a pointer field, which is
@@ -644,9 +645,44 @@ The ``df`` table itself contains the following functions and values:
     to that object. These are the only things a condition can do with a path
     that ends at a pointer. ``_from`` can be compared like any number, except inside ``any`` and ``all``.
 
-    All conditions are checked inside DFHack, without calling into Lua. What
-    they cannot express (arithmetic, calls to ``dfhack`` functions, methods
-    of the objects) goes in ``test``.
+    These conditions are checked inside DFHack, without calling into Lua.
+    What they cannot express (arithmetic, calls to ``dfhack`` functions,
+    methods of the objects) is done by a call, described next, or goes in
+    ``test``.
+
+  ``call``
+    Not an option of its own, but a form that a field and the left side of a
+    condition can take: ``{call=fn, args={'path', ...}}``. The function is
+    called for the entry with what the paths in ``args`` read, in that order,
+    and the one value it returns is the value of the field or what the
+    condition compares. Without ``args`` it is called with the entry itself
+    (``_value``). Any function will do, those of ``dfhack`` as much as one
+    written in Lua::
+
+      -- the citizens that are alive, with their ages
+      local out, n = df.read_fields(df.global.world.units.active, {
+          fields={'id', {call=dfhack.units.getAge, as='age'}},
+          where={{'flags1.inactive', '==', false},
+                 {{call=dfhack.units.isCitizen}, '==', true}}})
+
+      -- two fields handed to one function
+      local function is_metal(mat_type, mat_index)
+          local info = dfhack.matinfo.decode(mat_type, mat_index)
+          return info ~= nil and info.material.flags.IS_METAL
+      end
+      where={{{call=is_metal, args={'mat_type', 'mat_index'}}, '==', true}}
+
+    In ``fields`` a call needs ``as``, the name its values are stored under.
+    In ``where`` it combines with the other conditions, also inside ``and``,
+    ``or``, ``not``, ``any`` and ``all``, and conditions are checked in the
+    order they are written, so put the ones that need no call first. When one
+    of the paths cannot be reached (a null pointer on the way), the function
+    is not called and the value is *nil*; *nil*, from there or returned by the
+    function, passes no comparison. A condition compares numbers, text and
+    *true* or *false*, and it is an error when the function returns anything
+    else; ``any``, ``all`` and ``is_instance`` cannot be applied to a call. Each call goes into Lua once per entry, which costs far more
+    than a plain condition though less than indexing the container in a loop;
+    the function must not change the number of entries in the container.
 
   ``test``
     A function that is called with the ``_index`` of each entry that passed

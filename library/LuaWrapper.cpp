@@ -804,7 +804,8 @@ struct ReadHop {
 };
 
 // How a value lies in memory, which decides how a condition reads it.
-enum ReadLeaf { LEAF_INT, LEAF_BOOL, LEAF_FLOAT, LEAF_DOUBLE, LEAF_STRING, LEAF_CSTRING, LEAF_OTHER };
+// LEAF_DYNAMIC is what a function gives back, which is only known once it has been called.
+enum ReadLeaf { LEAF_INT, LEAF_BOOL, LEAF_FLOAT, LEAF_DOUBLE, LEAF_STRING, LEAF_CSTRING, LEAF_OTHER, LEAF_DYNAMIC };
 
 struct ReadAttr {
     const enum_identity *owner;
@@ -826,8 +827,8 @@ struct ReadAccessor {
     // FROM is the place in the list of the containers an entry came from. FLAG is one flag of a flag
     // array, SIZE the number of entries of a container, TYPE the type of an object, REF whatever
     // reading the place in Lua gives when that is not a single value, and GROUP a run of entries
-    // for a condition on any or all of them.
-    enum Kind { INDEX, FROM, VALUE, BIT, WHOLE, PTR, FLAG, SIZE, TYPE, REF, GROUP };
+    // for a condition on any or all of them. CALL is what a function gives back for the entry.
+    enum Kind { INDEX, FROM, VALUE, BIT, WHOLE, PTR, FLAG, SIZE, TYPE, REF, GROUP, CALL };
     Kind kind = VALUE;
     size_t source = 0;
     // offsets[0] is added to the entry's address; every further one is added after the hop of the
@@ -845,6 +846,8 @@ struct ReadAccessor {
     size_t whole_size = 0;
     std::vector<ReadAttr> attrs;
     std::vector<ReadCheck> checks;
+    int call = 0;                           // CALL: where the function is in the table of functions
+    std::vector<ReadAccessor> call_args;    // CALL: what is read and passed to it
     // Set when a condition can take the short way for whole numbers or for a single flag.
     // value_leaf, value_size and value_signed describe the value in memory for kind VALUE; leaf is
     // what the whole path ends in.
@@ -856,10 +859,11 @@ struct ReadAccessor {
     ReadLeaf leaf = LEAF_OTHER;
 };
 
-// A value as a condition sees it. The text of a string is not owned.
+// A value as a condition sees it. The text of a string is not owned, unless it is in own.
 struct ReadScalar {
     enum Kind { NIL, INT, FLOAT, BOOL, STRING, OTHER };
     Kind kind = NIL;
+    std::string own;                        // the text, where nothing else keeps it
     int64_t i = 0;
     double f = 0;
     bool b = false;
@@ -1307,6 +1311,8 @@ bool read_step_index(const std::string &part, const enum_identity *index_enum, i
 // The place, in the list that is being read, of the container the entry in hand came from: the
 // value of _from. Set before the conditions of each entry are tested.
 thread_local lua_Integer read_place = 0;
+// The stack index of the table of the functions the fields and conditions of the read call.
+thread_local int read_calls_idx = 0;
 
 // What a path is compiled for: a field to hand back, a value for a condition to compare, or a run
 // of entries for a condition on any or all of them.
@@ -1568,7 +1574,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             from_field = nullptr;
             if (field->mode == struct_field_info::OBJ_METHOD)
                 luaL_error(state, "df.read_fields: '%s' in '%s' is a method, which a path cannot call; "
-                                  "call it in 'test' or 'each'", field_name.c_str(), path.c_str());
+                                  "call it in a function given as {call=...}, or in 'test' or 'each'", field_name.c_str(), path.c_str());
             switch (field->mode)
             {
             case struct_field_info::PRIMITIVE:
@@ -1856,6 +1862,33 @@ void read_scalar_at(const uint8_t *ptr, ReadLeaf leaf, size_t size, bool is_sign
     }
 }
 
+bool read_push(lua_State *state, const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index);
+void read_scalar_from_lua(lua_State *state, int idx, ReadScalar &out);
+
+// Calls the function of a CALL accessor with what its arguments read for the entry, and leaves the
+// one value it gives back on the stack. Returns false, having pushed nil and called nothing, when
+// one of the arguments could not be reached.
+bool read_call(lua_State *state, const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index)
+{
+    const int top = lua_gettop(state);
+    luaL_checkstack(state, int(acc.call_args.size()) + 4, "df.read_fields: too many arguments");
+    lua_rawgeti(state, read_calls_idx, acc.call);
+    for (const ReadAccessor &arg : acc.call_args)
+        if (!read_push(state, arg, bases, index))
+        {
+            lua_settop(state, top);
+            lua_pushnil(state);
+            return false;
+        }
+    // the function may itself read fields
+    const int calls_idx = read_calls_idx;
+    const lua_Integer place = read_place;
+    lua_call(state, int(acc.call_args.size()), 1);
+    read_calls_idx = calls_idx;
+    read_place = place;
+    return true;
+}
+
 // The value at the end of a path, for a condition. Returns false when it could not be reached.
 bool read_scalar(lua_State *state, const ReadAccessor &acc, const std::vector<uint8_t*> &bases, lua_Integer index, ReadScalar &out)
 {
@@ -1864,6 +1897,23 @@ bool read_scalar(lua_State *state, const ReadAccessor &acc, const std::vector<ui
         out.kind = ReadScalar::INT;
         out.i = acc.kind == ReadAccessor::INDEX ? index : read_place;
         return true;
+    }
+    if (acc.kind == ReadAccessor::CALL)
+    {
+        const bool called = read_call(state, acc, bases, index);
+        const bool nothing = lua_isnil(state, -1);
+        read_scalar_from_lua(state, -1, out);
+        if (out.kind == ReadScalar::OTHER && !nothing)
+            luaL_error(state, "df.read_fields: a call in a condition returned a %s, which conditions "
+                              "cannot compare", luaL_typename(state, -1));
+        if (out.kind == ReadScalar::STRING)
+        {
+            // the text goes away with the value on the stack
+            out.own.assign(out.s, out.len);
+            out.s = out.own.data();
+        }
+        lua_pop(state, 1);
+        return called && !nothing;
     }
     const uint8_t *ptr = read_reach(state, acc, bases);
     if (!ptr)
@@ -2194,6 +2244,8 @@ bool read_push(lua_State *state, const ReadAccessor &acc, const std::vector<uint
         lua_pushinteger(state, index);
         return true;
     }
+    if (acc.kind == ReadAccessor::CALL)
+        return read_call(state, acc, bases, index);
 
     uint8_t *ptr = read_reach(state, acc, bases);
     if (!ptr)
@@ -2323,6 +2375,58 @@ void read_add_to_set(lua_State *state, ReadCond &cond, int idx)
         cond.text_set.emplace_back(item.s, item.len);
 }
 
+// Sets up {call=function, args={'path', ...}}: a value that is not read but worked out, by a function
+// that is handed what the paths read for the entry, or the entry itself when no paths are given.
+// allow_as says the table may also hold 'as', which the fields option gives a name with.
+size_t read_compile_call(lua_State *state, ReadPlan &plan, int spec_idx, bool allow_as)
+{
+    luaL_checkstack(state, 10, "df.read_fields");
+    lua_pushnil(state);
+    while (lua_next(state, spec_idx))
+    {
+        lua_pop(state, 1);
+        const char *key = lua_type(state, -1) == LUA_TSTRING ? lua_tostring(state, -1) : "";
+        if (strcmp(key, "call") && strcmp(key, "args") && (!allow_as || strcmp(key, "as")))
+            luaL_error(state, allow_as ? "df.read_fields: a call must be {call=function, args={'path', ...}, as='name'}"
+                                       : "df.read_fields: a call must be {call=function, args={'path', ...}}");
+    }
+    ReadAccessor acc;
+    acc.kind = ReadAccessor::CALL;
+    acc.leaf = LEAF_DYNAMIC;
+    lua_getfield(state, spec_idx, "call");
+    if (!lua_isfunction(state, -1))
+        luaL_error(state, "df.read_fields: 'call' must be a function");
+    acc.call = int(lua_rawlen(state, read_calls_idx)) + 1;
+    lua_rawseti(state, read_calls_idx, acc.call);
+
+    lua_getfield(state, spec_idx, "args");
+    if (lua_isnil(state, -1))
+    {
+        size_t arg = read_compile(state, plan, "_value");
+        acc.call_args.push_back(plan.accessors[arg]);
+    }
+    else
+    {
+        if (!lua_istable(state, -1))
+            luaL_error(state, "df.read_fields: the args of a call must be a list of paths");
+        int count = int(lua_rawlen(state, -1));
+        if (count > 16)
+            luaL_error(state, "df.read_fields: a call can be given 16 values at most");
+        for (int i = 1; i <= count; i++)
+        {
+            lua_rawgeti(state, -1, i);
+            if (lua_type(state, -1) != LUA_TSTRING)
+                luaL_error(state, "df.read_fields: the args of a call must be a list of paths");
+            size_t arg = read_compile(state, plan, lua_tostring(state, -1));
+            acc.call_args.push_back(plan.accessors[arg]);
+            lua_pop(state, 1);
+        }
+    }
+    lua_pop(state, 1);
+    plan.accessors.push_back(acc);
+    return plan.accessors.size() - 1;
+}
+
 size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
 {
     if (depth > 32)
@@ -2335,12 +2439,14 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
     lua_rawgeti(state, idx, 1);
     lua_rawgeti(state, idx, 2);
     // stack: [head, second]
-    if (lua_type(state, -2) != LUA_TSTRING)
-        luaL_error(state, "df.read_fields: a condition must start with a field name, 'and', 'or' or 'not'");
-    std::string head = lua_tostring(state, -2);
+    const bool head_is_call = lua_istable(state, -2);
+    if (lua_type(state, -2) != LUA_TSTRING && !head_is_call)
+        luaL_error(state, "df.read_fields: a condition must start with a field name, a call, 'and', 'or' or 'not'");
+    std::string head = head_is_call ? "a call" : lua_tostring(state, -2);
 
-    if ((lua_istable(state, -1) && (head == "and" || head == "or" || head == "not")) ||
-        (lua_isnil(state, -1) && (head == "and" || head == "or")))
+    if (!head_is_call &&
+        ((lua_istable(state, -1) && (head == "and" || head == "or" || head == "not")) ||
+         (lua_isnil(state, -1) && (head == "and" || head == "or"))))
     {
         cond.kind = head == "and" ? ReadCond::AND : head == "or" ? ReadCond::OR : ReadCond::NOT;
         int count = int(lua_rawlen(state, idx));
@@ -2412,6 +2518,15 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             luaL_error(state, "df.read_fields: unknown comparison '%s' on '%s'", op.c_str(), head.c_str());
 
         const bool group = cond.kind == ReadCond::ANY || cond.kind == ReadCond::ALL;
+        if (head_is_call)
+        {
+            if (group)
+                luaL_error(state, "df.read_fields: '%s' needs a container or an array, not a call", op.c_str());
+            lua_rawgeti(state, idx, 1);
+            cond.accessor = read_compile_call(state, plan, lua_gettop(state), false);
+            lua_pop(state, 1);
+        }
+        else
         cond.accessor = read_compile(state, plan, head, group ? USE_GROUP : USE_COND);
         // a copy, as compiling another path moves the accessors
         const ReadAccessor acc = plan.accessors[cond.accessor];
@@ -2479,7 +2594,7 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             luaL_error(state, "df.read_fields: '%s' holds a kind of value that conditions cannot compare", head.c_str());
         else if (cond.kind == ReadCond::TEXT)
         {
-            if ((acc.leaf != LEAF_STRING && acc.leaf != LEAF_CSTRING) ||
+            if ((acc.leaf != LEAF_STRING && acc.leaf != LEAF_CSTRING && acc.leaf != LEAF_DYNAMIC) ||
                 lua_type(state, -1) != LUA_TSTRING)
                 luaL_error(state, "df.read_fields: '%s' on '%s' needs a field that holds text, and text to look for",
                            op.c_str(), head.c_str());
@@ -2835,7 +2950,8 @@ bool read_describe_links(const type_identity *type, ReadSource &src)
 // Sets a read up for what is at first_idx and the options at options_idx. That is a container, a
 // table of named containers, a linked list, or else an object (when it was taken from a list, as
 // from_list says) or a type, both of which set up a read of a list of objects. Pushes the test
-// function and then the each function, with nil for one there is none of.
+// function, then the each function, with nil for one there is none of, and then the table of the
+// functions that fields and conditions call.
 void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx, bool from_list)
 {
     luaL_checkstack(state, 20, "df.read_fields");
@@ -2909,6 +3025,8 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
     const int test_idx = lua_gettop(state);
     lua_pushnil(state);
     const int each_idx = lua_gettop(state);
+    lua_newtable(state);
+    read_calls_idx = lua_gettop(state);
 
     if (lua_istable(state, options_idx))
     {
@@ -2988,12 +3106,30 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
             {
                 lua_rawgeti(state, -1, i);
                 std::string name, path;
+                bool ready = false;     // a call, whose accessor is made here
                 if (lua_type(state, -1) == LUA_TSTRING)
                     name = path = lua_tostring(state, -1);
                 else if (lua_istable(state, -1))
                 {
                     // {path='a.b', as='name'}: read from the one, stored under the other
                     const int entry_idx = lua_gettop(state);
+                    lua_getfield(state, entry_idx, "call");
+                    const bool is_call = !lua_isnil(state, -1);
+                    lua_pop(state, 1);
+                    if (is_call)
+                    {
+                        // {call=function, args={...}, as='name'}: worked out by the function
+                        lua_getfield(state, entry_idx, "as");
+                        if (lua_type(state, -1) != LUA_TSTRING || lua_rawlen(state, -1) == 0)
+                            luaL_error(state, "df.read_fields: a call in fields needs as='name' to be stored under");
+                        name = lua_tostring(state, -1);
+                        lua_pop(state, 1);
+                        // not a path any field can have: the accessor is ready, and this says which
+                        path = "\x01" + std::to_string(read_compile_call(state, plan, entry_idx, true));
+                        ready = true;
+                    }
+                    else
+                    {
                     lua_pushnil(state);
                     while (lua_next(state, entry_idx))
                     {
@@ -3013,10 +3149,14 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
                     lua_pop(state, 2);
                     if (name.empty())
                         luaL_error(state, "df.read_fields: a field cannot be stored under an empty name");
+                    }
                 }
                 else
-                    luaL_error(state, "df.read_fields: a field must be a string or {path='...', as='...'}");
+                    luaL_error(state, "df.read_fields: a field must be a string, {path='...', as='...'} or "
+                                      "{call=function, args={...}, as='...'}");
                 lua_pop(state, 1);
+                if (!ready && !path.empty() && path[0] == '\x01')
+                    luaL_error(state, "df.read_fields: a field name cannot start with a control character");
                 // a function gets its arguments by position, so a name given twice is passed twice
                 auto old = std::find(plan.names.begin(), plan.names.end(), name);
                 if (plan.has_each || old == plan.names.end())
@@ -3032,7 +3172,8 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
     }
 
     for (const std::string &path : plan.paths)
-        plan.columns.push_back(read_compile(state, plan, path));
+        plan.columns.push_back(path[0] == '\x01' ? size_t(std::stoul(path.substr(1)))
+                                                 : read_compile(state, plan, path));
 }
 
 // Does a read that has been set up. from_idx holds what to read from: a list of containers (or of
@@ -3040,8 +3181,9 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
 // list of them, and one set up for a linked list takes the list's first link. first_bound says the plan was set
 // up from the first of them a moment ago, so that one need not be looked at again.
 int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list, int out_idx, int test_idx,
-             int each_idx, bool first_bound)
+             int each_idx, int calls_idx, bool first_bound)
 {
+    read_calls_idx = calls_idx;
     luaL_checkstack(state, int(plan.names.size()) + 20, "df.read_fields: too many fields");
 
     // a range belongs to one table of named containers; on the list around them, or on a list of
@@ -3351,8 +3493,8 @@ static int meta_read_fields(lua_State *state)
         lua_pushvalue(state, 1);
     // stack: [container, options, out, first]
     read_setup(state, plan, 4, 2, from == READ_LIST);
-    // stack: [container, options, out, first, test, each]
-    return read_run(state, plan, 1, from == READ_LIST, 3, 5, 6, true);
+    // stack: [container, options, out, first, test, each, calls]
+    return read_run(state, plan, 1, from == READ_LIST, 3, 5, 6, 7, true);
 }
 
 static int read_plan_gc(lua_State *state)
@@ -3361,7 +3503,8 @@ static int read_plan_gc(lua_State *state)
     return 0;
 }
 
-// The function df.prepare_read_fields returns. Upvalues: the type table, the plan, the test function, the each function.
+// The function df.prepare_read_fields returns. Upvalues: the type table, the plan, the test function, the
+// each function, the table of the functions that fields and conditions call.
 static int read_prepared_call(lua_State *state)
 {
     int argc = lua_gettop(state);
@@ -3382,8 +3525,9 @@ static int read_prepared_call(lua_State *state)
     auto plan = (const ReadPlan*)lua_touserdata(state, lua_upvalueindex(2));
     lua_pushvalue(state, lua_upvalueindex(3));
     lua_pushvalue(state, lua_upvalueindex(4));
-    // stack: [container, out, test, each]
-    return read_run(state, *plan, 1, from == READ_LIST, 2, 3, 4, false);
+    lua_pushvalue(state, lua_upvalueindex(5));
+    // stack: [container, out, test, each, calls]
+    return read_run(state, *plan, 1, from == READ_LIST, 2, 3, 4, 5, false);
 }
 
 static int meta_prepare_read_fields(lua_State *state)
@@ -3413,12 +3557,13 @@ static int meta_prepare_read_fields(lua_State *state)
         lua_pushvalue(state, 1);
     // stack: [container, options, plan, first]
     read_setup(state, *plan, 4, 2, from == READ_LIST);
-    // stack: [container, options, plan, first, test, each]
+    // stack: [container, options, plan, first, test, each, calls]
     lua_pushvalue(state, UPVAL_TYPETABLE);
     lua_pushvalue(state, 3);
     lua_pushvalue(state, 5);
     lua_pushvalue(state, 6);
-    lua_pushcclosure(state, read_prepared_call, 4);
+    lua_pushvalue(state, 7);
+    lua_pushcclosure(state, read_prepared_call, 5);
     return 1;
 }
 
