@@ -418,7 +418,7 @@ function test.errors()
         expect.error_match('out must be a table', function() df.readFields(items, {}, 5) end)
         expect.error_match("no field 'nope'", function() df.readFields(items, {fields={'nope'}}) end)
         expect.error_match("no flag 'nope'", function() df.readFields(items, {fields={'flags1.nope'}}) end)
-        expect.error_match('not a single value', function() df.readFields(job.items, {fields={'item'}}) end)
+        expect.error_match('not a single value', function() df.readFields(job.items, {where={{'_value', '==', 1}}}) end)
         expect.error_match('no readable attribute', function() df.readFields(items, {fields={'item_type.nope'}}) end)
         expect.error_match('has no attributes', function() df.readFields(items, {fields={'quantity.nope'}}) end)
         expect.error_match('field names must be strings', function() df.readFields(items, {fields={5}}) end)
@@ -479,7 +479,7 @@ function test.null_pointers()
             df.readFields(job.items, {where={{'item', 'in', {df.NULL}}}})
         end)
         -- a pointer is still not something to hand back
-        expect.error_match('not a single value', function() df.readFields(job.items, {fields={'item'}}) end)
+        expect.error_match('not a single value', function() df.readFields(job.items, {where={{'_value', '==', 1}}}) end)
     end)
 end
 
@@ -1190,5 +1190,573 @@ function test.range_errors()
             local out, n = read({items=items, _range={1, 2}})
             expect.table_eq(column(out, '_index', n), {1, 2})
         end)
+    end)
+end
+
+
+-- two materials, a kind of object with arrays, flag arrays and vectors in it
+local function with_materials(fn)
+    local a, b = df.material:new(), df.material:new()
+    a.id, b.id = 'IRON', 'IRONWOOD'
+    a.state_name.Solid, a.state_name.Liquid = 'iron', 'molten iron'
+    b.state_name.Solid, b.state_name.Liquid = 'ironwood', 'n/a'
+    a.state_color.Solid, a.state_color.Liquid = 4, 9
+    b.state_color.Solid, b.state_color.Liquid = 6, 6
+    a.flags.IS_METAL = true
+    b.flags.IS_STONE = true
+    a.strength.yield.IMPACT, b.strength.yield.IMPACT = 500, 20
+    for _, v in ipairs{df.item_type.BAR, df.item_type.WEAPON, df.item_type.ARMOR} do
+        a.reaction_product.item_type:insert('#', v)
+    end
+    b.reaction_product.item_type:insert('#', df.item_type.WOOD)
+    dfhack.with_finalize(function() a:delete() b:delete() end, fn, a, b)
+end
+
+function test.lists_of_objects()
+    with_materials(function(a, b)
+        local out, n = df.readFields({a, b}, {fields={'_index', '_from', 'id'}})
+        expect.eq(n, 2)
+        expect.table_eq(column(out, '_index', n), {1, 2})
+        expect.table_eq(column(out, '_from', n), {1, 1})
+        expect.table_eq(column(out, 'id', n), {'IRON', 'IRONWOOD'})
+
+        out, n = df.readFields({a, b, a}, {fields={'_index'}, where={{'id', '==', 'IRON'}}})
+        expect.table_eq(column(out, '_index', n), {1, 3})
+
+        -- the test function is given the place in the list
+        local seen = {}
+        out, n = df.readFields({a, b}, {test=function(i) seen[#seen + 1] = i return i == 2 end, fields={'id'}})
+        expect.table_eq(seen, {1, 2})
+        expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
+
+        out, n = df.readFields({})
+        expect.eq(n, 0)
+
+        expect.error_match('entry 2 of the list is not a material', function() df.readFields({a, 5}) end)
+        expect.error_match('entry 2 of the list is not a material', function()
+            with_job(function(job) df.readFields({a, job}) end)
+        end)
+        expect.error_match('ranges can only be given for containers', function()
+            df.readFields({a, b}, nil, nil, {{0, 1}})
+        end)
+        expect.error_match('not a container', function() df.readFields(a) end)
+    end)
+end
+
+function test.objects_of_derived_classes()
+    local worker = df.general_ref_unit_workerst:new()
+    worker.unit_id = 7
+    local holder = df.general_ref_building_holderst:new()
+    holder.building_id = 9
+    dfhack.with_finalize(
+        function() worker:delete() holder:delete() end,
+        function()
+            -- objects of different classes are read as the class they all derive from
+            local out, n = df.readFields({worker, holder}, {fields={'unit_id', 'general_ref_building:building_id'}})
+            expect.eq(n, 2)
+            expect.eq(out.unit_id[1], 7)
+            expect.eq(out.unit_id[2], nil)
+            expect.eq(out['general_ref_building:building_id'][2], 9)
+
+            local read = df.prepareReadFields(df.general_ref, {fields={'_index'}, where={{'unit_id', '==', 7}}})
+            out, n = read({holder, worker, holder})
+            expect.table_eq(column(out, '_index', n), {2})
+            out, n = read({})
+            expect.eq(n, 0)
+            with_materials(function(a)
+                expect.error_match('entry 1 of the list is not a general_ref', function() read({a}) end)
+            end)
+            expect.error_match('set up for a list of objects', function() read(worker) end)
+
+            -- a read set up from a type takes only objects of that type
+            read = df.prepareReadFields(df.general_ref_unit_workerst, {fields={'unit_id'}})
+            out, n = read({worker})
+            expect.table_eq(column(out, 'unit_id', n), {7})
+            expect.error_match('entry 1 of the list is not a general_ref_unit_workerst', function() read({holder}) end)
+        end)
+end
+
+function test.linked_lists()
+    local jobs, links = {}, {}
+    for i = 1, 4 do
+        jobs[i] = df.job:new()
+        jobs[i].completion_timer = i * 10
+        links[i] = df.job_list_link:new()
+        links[i].item = jobs[i]
+    end
+    -- the first link of a list holds no item, and neither does the third here
+    local head = df.job_list_link:new()
+    links[3].item = nil
+    head.next = links[1]
+    for i = 1, 3 do links[i].next = links[i + 1] end
+    dfhack.with_finalize(
+        function()
+            head:delete()
+            for i = 1, 4 do links[i]:delete() jobs[i]:delete() end
+        end,
+        function()
+            local out, n = df.readFields(head, {fields={'_index', 'completion_timer'}})
+            expect.eq(n, 3)
+            expect.table_eq(column(out, '_index', n), {0, 1, 2})
+            expect.table_eq(column(out, 'completion_timer', n), {10, 20, 40})
+
+            out, n = df.readFields(head, {fields={'completion_timer'}, where={{'completion_timer', '>', 10}}, limit=1})
+            expect.table_eq(column(out, 'completion_timer', n), {20})
+
+            local read = df.prepareReadFields(head, {fields={'completion_timer'}})
+            out, n = read(links[2])
+            expect.table_eq(column(out, 'completion_timer', n), {20, 40})
+            expect.error_match('set up for a linked list', function() read(jobs[1]) end)
+            expect.error_match('set up for a linked list', function() read({head}) end)
+            expect.error_match('ranges can only be given for containers', function() read(head, nil, {{0, 1}}) end)
+
+            -- an empty list
+            links[1].item = nil
+            head.next = nil
+            out, n = df.readFields(head, {fields={'completion_timer'}})
+            expect.eq(n, 0)
+        end)
+end
+
+function test.limit()
+    with_job(function(job, specs)
+        local items = job.job_items.elements
+        local out, n = df.readFields(items, {fields={'_index'}, limit=2})
+        expect.table_eq(column(out, '_index', n), {0, 1})
+        out, n = df.readFields(items, {fields={'_index'}, where={{'item_type', '==', df.item_type.BAR}}, limit=1})
+        expect.table_eq(column(out, '_index', n), {0})
+        out, n = df.readFields(items, {fields={'_index'}, where={{'quantity', '>=', 5}}, limit=10})
+        expect.table_eq(column(out, '_index', n), {2, 3})
+
+        -- nothing after the last entry that is kept is looked at
+        local seen = 0
+        out, n = df.readFields(items, {test=function() seen = seen + 1 return true end, limit=3})
+        expect.eq(n, 3)
+        expect.eq(seen, 3)
+
+        -- the limit is on the whole call, not on each container
+        out, n = df.readFields({items, items}, {fields={'_from', '_index'}, limit=7})
+        expect.eq(n, 7)
+        expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1, 2, 2})
+        out, n = df.readFields({items, items}, {fields={'_from'}, limit=5})
+        expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1})
+        out, n = df.readFields(items, {fields={'_index'}, limit=2}, nil, {{1, 4}})
+        expect.table_eq(column(out, '_index', n), {1, 2})
+
+        local read = df.prepareReadFields(items, {fields={'_index'}, limit=2})
+        for _ = 1, 2 do
+            out, n = read(items)
+            expect.table_eq(column(out, '_index', n), {0, 1})
+        end
+
+        for _, bad in ipairs{0, -1, 1.5, '2', true} do
+            expect.error_match('limit must be a whole number', function() df.readFields(items, {limit=bad}) end)
+        end
+        expect.error_match("unknown option 'feilds'", function() df.readFields(items, {feilds={'quantity'}}) end)
+        expect.error_match('unknown option', function() df.readFields(items, {[1]='quantity'}) end)
+    end)
+end
+
+function test.entries_of_arrays_and_vectors()
+    with_materials(function(a, b)
+        local list = {a, b}
+        -- an entry of an array is named by its number or by the name the array is indexed with
+        local out, n = df.readFields(list, {fields={'state_name.Solid', 'state_name.1', 'state_color.Liquid',
+                                                   'strength.yield.IMPACT'}})
+        expect.eq(n, 2)
+        expect.table_eq(column(out, 'state_name.Solid', n), {'iron', 'ironwood'})
+        expect.table_eq(column(out, 'state_name.1', n), {'molten iron', 'n/a'})
+        expect.table_eq(column(out, 'state_color.Liquid', n), {9, 6})
+        expect.table_eq(column(out, 'strength.yield.IMPACT', n), {500, 20})
+
+        out, n = df.readFields(list, {fields={'id'}, where={{'state_color.Solid', '<', 5}}})
+        expect.table_eq(column(out, 'id', n), {'IRON'})
+        out, n = df.readFields(list, {fields={'id'}, where={{'state_name.Liquid', '==', 'n/a'}}})
+        expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
+
+        -- an entry that a vector does not have is nil, and no condition on it holds
+        out, n = df.readFields(list, {fields={'reaction_product.item_type.0', 'reaction_product.item_type.2',
+                                             'reaction_product.item_type._size'}})
+        expect.table_eq(column(out, 'reaction_product.item_type.0', n), {df.item_type.BAR, df.item_type.WOOD})
+        expect.eq(out['reaction_product.item_type.2'][1], df.item_type.ARMOR)
+        expect.eq(out['reaction_product.item_type.2'][2], nil)
+        expect.table_eq(column(out, 'reaction_product.item_type._size', n), {3, 1})
+        out, n = df.readFields(list, {fields={'id'}, where={{'reaction_product.item_type.2', '~=', df.item_type.BAR}}})
+        expect.table_eq(column(out, 'id', n), {'IRON'})
+        out, n = df.readFields(list, {fields={'id'}, where={{'reaction_product.item_type._size', '<', 2}}})
+        expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
+        out, n = df.readFields(list, {fields={'id'}, where={{'reaction_product.item_type._size', '==',
+                                                            {field='state_color.Solid'}}}})
+        expect.eq(n, 0)
+
+        expect.error_match('outside the array', function() df.readFields(list, {fields={'state_name.99'}}) end)
+        expect.error_match('outside the array', function() df.readFields(list, {fields={'state_name.None'}}) end)
+        expect.error_match('must be the index of an entry', function()
+            df.readFields(list, {fields={'state_name.nope'}})
+        end)
+        expect.error_match('not a single value', function() df.readFields(list, {where={{'state_name', '==', 'x'}}}) end)
+    end)
+
+    with_job(function(job, specs)
+        -- through a vector of pointers, and on to what an entry points to
+        local out, n = df.readFields({job}, {fields={'job_items.elements.1.quantity', 'job_items.elements.9.quantity',
+                                                    'items.0.job_item_idx', 'items._size', 'items.0.item'}})
+        expect.eq(n, 1)
+        expect.eq(out['job_items.elements.1.quantity'][1], specs[2].quantity)
+        expect.eq(out['job_items.elements.9.quantity'][1], nil)
+        expect.eq(out['items.0.job_item_idx'][1], 4)
+        expect.eq(out['items._size'][1], 2)
+        expect.eq(out['items.0.item'][1], nil)
+    end)
+
+    with_block(function(block)
+        -- entries of a grid that is a field
+        block.designation[3][5].flow_size = 6
+        local out, n = df.readFields({block}, {fields={'designation.3.5.flow_size', 'designation.3.4.flow_size'}})
+        expect.eq(out['designation.3.5.flow_size'][1], 6)
+        expect.eq(out['designation.3.4.flow_size'][1], 0)
+        out, n = df.readFields({block}, {where={{'designation.3.5.flow_size', '==', 6}}})
+        expect.eq(n, 1)
+        expect.error_match('outside the array', function() df.readFields({block}, {fields={'designation.16.0.flow_size'}}) end)
+    end)
+end
+
+function test.flag_arrays()
+    with_materials(function(a, b)
+        local list = {a, b}
+        local out, n = df.readFields(list, {fields={'flags.IS_METAL', 'flags.IS_STONE'}})
+        expect.table_eq(column(out, 'flags.IS_METAL', n), {true, false})
+        expect.table_eq(column(out, 'flags.IS_STONE', n), {false, true})
+        out, n = df.readFields(list, {fields={'id'}, where={{'flags.IS_METAL', '==', true}}})
+        expect.table_eq(column(out, 'id', n), {'IRON'})
+        out, n = df.readFields(list, {fields={'id'}, where={{'flags.IS_METAL', '==', false}}})
+        expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
+        out, n = df.readFields(list, {fields={'id'}, where={{'or', {'flags.IS_METAL', '==', true},
+                                                            {'flags.IS_STONE', '==', true}}}})
+        expect.eq(n, 2)
+        -- by number, as Lua reads them too
+        out, n = df.readFields(list, {fields={'flags.' .. df.material_flags.IS_METAL}})
+        expect.table_eq(column(out, 'flags.' .. df.material_flags.IS_METAL, n), {true, false})
+        expect.error_match("no flag 'NOPE'", function() df.readFields(list, {fields={'flags.NOPE'}}) end)
+    end)
+end
+
+function test.same_as_lua()
+    with_materials(function(a, b)
+        with_job(function(job)
+            -- anything that is not a single value comes back as reading it in Lua gives it
+            local out, n = df.readFields({a}, {fields={'_value', 'heat', 'state_name', 'flags', 'reaction_product.item_type'}})
+            expect.eq(n, 1)
+            expect.eq(out._value[1], a)
+            expect.eq(out.heat[1], a.heat)
+            expect.eq(out.state_name[1], a.state_name)
+            expect.eq(out.state_name[1].Solid, 'iron')
+            expect.eq(out.flags[1], a.flags)
+            expect.true_(out.flags[1].IS_METAL)
+            expect.eq(out['reaction_product.item_type'][1], a.reaction_product.item_type)
+            expect.eq(#out['reaction_product.item_type'][1], 3)
+
+            out, n = df.readFields(job.job_items.elements, {fields={'_value'}, where={{'quantity', '==', 7}}})
+            expect.eq(n, 1)
+            expect.eq(out._value[1], job.job_items.elements[2])
+            out, n = df.readFields({items=job.job_items.elements}, {fields={'items'}, limit=1})
+            expect.eq(out.items[1], job.job_items.elements[0])
+
+            -- a pointer gives the object it points to, or nil
+            out, n = df.readFields(job.items, {fields={'item'}})
+            expect.eq(n, 2)
+            expect.eq(out.item[1], nil)
+            expect.eq(out.item[2], nil)
+            out, n = df.readFields({job}, {fields={'job_items.elements.0', 'job_items.elements.7'}})
+            expect.eq(out['job_items.elements.0'][1], job.job_items.elements[0])
+            expect.eq(out['job_items.elements.7'][1], nil)
+        end)
+    end)
+end
+
+function test.types()
+    with_job(function(job)
+        local refs = job.general_refs
+        local worker = df.general_ref_unit_workerst:new()
+        local holder = df.general_ref_building_holderst:new()
+        refs:insert('#', worker)
+        refs:insert('#', holder)
+        dfhack.with_finalize(
+            function()
+                refs:resize(0)
+                worker:delete()
+                holder:delete()
+            end,
+            function()
+                local out, n = df.readFields(refs, {fields={'_type'}})
+                expect.eq(n, 2)
+                expect.eq(out._type[1], df.general_ref_unit_workerst)
+                expect.eq(out._type[2], df.general_ref_building_holderst)
+
+                local function matching(cond)
+                    local found, count = df.readFields(refs, {fields={'_index'}, where={cond}})
+                    return column(found, '_index', count)
+                end
+                expect.table_eq(matching{'_type', '==', df.general_ref_unit_workerst}, {0})
+                expect.table_eq(matching{'_type', '~=', df.general_ref_unit_workerst}, {1})
+                expect.table_eq(matching{'_type', '==', df.general_ref_unit}, {})
+                expect.table_eq(matching{'_type', 'is_instance', df.general_ref_unit}, {0})
+                expect.table_eq(matching{'_type', 'is_instance', df.general_ref_building}, {1})
+                expect.table_eq(matching{'_type', 'is_instance', df.general_ref}, {0, 1})
+                expect.table_eq(matching{'not', {'_type', 'is_instance', df.general_ref_unit}}, {1})
+                expect.table_eq(matching{'_type', 'is_instance', df.job}, {})
+
+                expect.error_match('needs a type', function() matching{'_type', '==', 5} end)
+                expect.error_match('needs a type', function() matching{'_type', 'is_instance', worker} end)
+                expect.error_match('can only be tested with', function() matching{'_type', '<', df.general_ref} end)
+                expect.error_match("ends in '_type'", function() matching{'_index', 'is_instance', df.general_ref} end)
+            end)
+    end)
+end
+
+function test.methods()
+    with_job(function(job)
+        local refs = job.general_refs
+        local worker = df.general_ref_unit_workerst:new()
+        local holder = df.general_ref_building_holderst:new()
+        refs:insert('#', worker)
+        refs:insert('#', holder)
+        dfhack.with_finalize(
+            function()
+                refs:resize(0)
+                worker:delete()
+                holder:delete()
+            end,
+            function()
+                -- a method that takes no arguments can end a path
+                local out, n = df.readFields(refs, {fields={'getType()'}})
+                expect.eq(n, 2)
+                expect.eq(out['getType()'][1], df.general_ref_type.UNIT_WORKER)
+                expect.eq(out['getType()'][2], df.general_ref_type.BUILDING_HOLDER)
+                expect.eq(out['getType()'][1], worker:getType())
+
+                out, n = df.readFields(refs, {fields={'_index'},
+                                              where={{'getType()', '==', df.general_ref_type.BUILDING_HOLDER}}})
+                expect.table_eq(column(out, '_index', n), {1})
+                out, n = df.readFields(refs, {fields={'_index'},
+                    where={{'getType()', 'in', {df.general_ref_type.UNIT_WORKER, df.general_ref_type.ITEM}}}})
+                expect.table_eq(column(out, '_index', n), {0})
+                out, n = df.readFields({job}, {where={{'general_refs.1.getType()', '==',
+                                                      df.general_ref_type.BUILDING_HOLDER}}})
+                expect.eq(n, 1)
+
+                expect.error_match('is a method; write it with %(%)', function()
+                    df.readFields(refs, {fields={'getType'}})
+                end)
+                expect.error_match('is not a method', function()
+                    df.readFields(job.job_items.elements, {fields={'quantity()'}})
+                end)
+                expect.error_match('must be the last step', function()
+                    df.readFields(refs, {fields={'getType().x'}})
+                end)
+                expect.error_match('takes arguments', function() df.readFields(refs, {fields={'setID()'}}) end)
+            end)
+    end)
+end
+
+function test.ids_followed_to_their_objects()
+    with_job(function(job)
+        local refs = job.general_refs
+        local all = df.global.world.entities.all
+        local entity = df.historical_entity:new()
+        entity.id = #all > 0 and all[#all - 1].id + 1000 or 1000
+        entity.type = df.historical_entity_type.MerchantCompany
+        local to_entity, to_nothing = df.general_ref_entity:new(), df.general_ref_entity:new()
+        to_entity.entity_id = entity.id
+        to_nothing.entity_id = entity.id + 1
+        refs:insert('#', to_entity)
+        refs:insert('#', to_nothing)
+        all:insert('#', entity)
+        dfhack.with_finalize(
+            function()
+                all:erase(#all - 1)
+                entity:delete()
+                refs:resize(0)
+                to_entity:delete()
+                to_nothing:delete()
+            end,
+            function()
+                -- '_target' goes from an id to the object that has it, as the type's find() does
+                local out, n = df.readFields(refs, {fields={'entity_id._target.id', 'entity_id._target.type',
+                                                           'entity_id._target'}})
+                expect.eq(n, 2)
+                expect.eq(out['entity_id._target.id'][1], entity.id)
+                expect.eq(out['entity_id._target.id'][2], nil)
+                expect.eq(out['entity_id._target.type'][1], df.historical_entity_type.MerchantCompany)
+                expect.eq(out['entity_id._target'][1], entity)
+                expect.eq(out['entity_id._target'][2], nil)
+
+                out, n = df.readFields(refs, {fields={'_index'}, where={{'entity_id._target.type', '==',
+                                                                        df.historical_entity_type.MerchantCompany}}})
+                expect.table_eq(column(out, '_index', n), {0})
+                out, n = df.readFields(refs, {fields={'_index'}, where={{'entity_id._target.type', '~=',
+                                                                        df.historical_entity_type.MerchantCompany}}})
+                expect.eq(n, 0)
+
+                expect.error_match('not the id of', function()
+                    df.readFields(job.job_items.elements, {fields={'quantity._target'}})
+                end)
+            end)
+    end)
+end
+
+function test.conditions_on_two_fields()
+    with_job(function(job, specs)
+        local items = job.job_items.elements
+        local function matching(cond)
+            local out, n = df.readFields(items, {fields={'_index'}, where={cond}})
+            return column(out, '_index', n)
+        end
+        -- quantities are 3 1 7 5 2 and mat_index is 10 20 30 40 50
+        items[1].mat_index = 1
+        items[2].mat_index = 6
+        expect.table_eq(matching{'quantity', '==', {field='mat_index'}}, {1})
+        expect.table_eq(matching{'quantity', '~=', {field='mat_index'}}, {0, 2, 3, 4})
+        expect.table_eq(matching{'quantity', '>', {field='mat_index'}}, {2})
+        expect.table_eq(matching{'quantity', '>=', {field='mat_index'}}, {1, 2})
+        expect.table_eq(matching{'quantity', '<', {field='mat_index'}}, {0, 3, 4})
+        expect.table_eq(matching{'quantity', '<=', {field='mat_index'}}, {0, 1, 3, 4})
+        expect.table_eq(matching{'_index', '==', {field='quantity'}}, {1})
+        expect.table_eq(matching{'reaction_class', '==', {field='has_material_reaction_product'}}, {0, 1, 2, 3, 4})
+        items[0].reaction_class = 'x'
+        expect.table_eq(matching{'reaction_class', '>', {field='has_material_reaction_product'}}, {0})
+
+        expect.error_match("no field 'nope'", function() matching{'quantity', '==', {field='nope'}} end)
+    end)
+end
+
+function test.sets_and_text()
+    with_job(function(job, specs)
+        local items = job.job_items.elements
+        local function matching(cond)
+            local out, n = df.readFields(items, {fields={'_index'}, where={cond}})
+            return column(out, '_index', n)
+        end
+        -- a set as Lua code keeps one, with the values as keys
+        expect.table_eq(matching{'item_type', 'in_keys', {[df.item_type.BAR]=true, [df.item_type.SEEDS]=true}}, {0, 3, 4})
+        expect.table_eq(matching{'item_type', 'in_keys', {[df.item_type.BAR]=false, [df.item_type.SEEDS]=1}}, {4})
+        expect.table_eq(matching{'item_type', 'in_keys', {}}, {})
+        expect.table_eq(matching{'not', {'quantity', 'in_keys', {[3]=true, [7]=true}}}, {1, 3, 4})
+        expect.error_match('values as keys', function() matching{'quantity', 'in_keys', 3} end)
+
+        items[0].reaction_class = 'FLUX_STONE'
+        items[1].reaction_class = 'FLUX'
+        items[2].reaction_class = 'STONE_FLUX'
+        expect.table_eq(matching{'reaction_class', 'in_keys', {FLUX=true, [''] = true}}, {1, 3, 4})
+        expect.table_eq(matching{'reaction_class', 'startswith', 'FLUX'}, {0, 1})
+        expect.table_eq(matching{'reaction_class', 'endswith', 'FLUX'}, {1, 2})
+        expect.table_eq(matching{'reaction_class', 'contains', 'X_S'}, {0})
+        expect.table_eq(matching{'reaction_class', 'contains', 'E_F'}, {2})
+        expect.table_eq(matching{'reaction_class', 'contains', ''}, {0, 1, 2, 3, 4})
+        expect.table_eq(matching{'reaction_class', 'startswith', 'FLUX_STONE_AND_MORE'}, {})
+        -- the text is looked for as it stands, not as a pattern
+        expect.table_eq(matching{'reaction_class', 'contains', '.'}, {})
+        expect.table_eq(matching{'not', {'reaction_class', 'contains', 'FLUX'}}, {3, 4})
+
+        expect.error_match('needs a field that holds text', function() matching{'quantity', 'contains', '3'} end)
+        expect.error_match('needs a field that holds text', function() matching{'reaction_class', 'contains', 3} end)
+    end)
+end
+
+function test.any_and_all()
+    with_materials(function(a, b)
+        with_job(function(job, specs)
+            local function matching(list, cond)
+                local out, n = df.readFields(list, {fields={'_index'}, where={cond}})
+                return column(out, '_index', n)
+            end
+            -- over a vector of values, where '_value' is the entry
+            local list = {a, b}
+            local products = 'reaction_product.item_type'
+            expect.table_eq(matching(list, {products, 'any', {{'_value', '==', df.item_type.WEAPON}}}), {1})
+            expect.table_eq(matching(list, {products, 'any', {{'_value', '==', df.item_type.WOOD}}}), {2})
+            expect.table_eq(matching(list, {products, 'any', {{'_value', '==', df.item_type.SEEDS}}}), {})
+            expect.table_eq(matching(list, {products, 'all', {{'_value', '~=', df.item_type.WOOD}}}), {1})
+            expect.table_eq(matching(list, {products, 'any', {{'_index', '==', 2}}}), {1})
+            expect.table_eq(matching(list, {products, 'any', {}}), {1, 2})
+            expect.table_eq(matching(list, {'not', {products, 'any', {{'_value', '==', df.item_type.BAR}}}}), {2})
+            -- over an array of a fixed size
+            expect.table_eq(matching(list, {'state_color', 'any', {{'_value', '==', 9}}}), {1})
+            expect.table_eq(matching(list, {'state_name', 'any', {{'_value', 'startswith', 'iron'}}}), {1, 2})
+            expect.table_eq(matching(list, {'state_name', 'all', {{'_value', '~=', 'iron'}}}), {2})
+            -- every condition must hold for one and the same entry
+            expect.table_eq(matching(list, {products, 'any', {{'_value', '==', df.item_type.BAR},
+                                                              {'_index', '==', 1}}}), {})
+
+            -- over a vector of pointers to structures
+            local other = df.job:new()
+            dfhack.with_finalize(function() other:delete() end, function()
+                local jobs = {job, other}
+                local elements = 'job_items.elements'
+                expect.table_eq(matching(jobs, {elements, 'any', {{'quantity', '>', 6}}}), {1})
+                expect.table_eq(matching(jobs, {elements, 'any', {{'quantity', '>', 7}}}), {})
+                expect.table_eq(matching(jobs, {elements, 'all', {{'quantity', '>', 0}}}), {1, 2})
+                expect.table_eq(matching(jobs, {elements, 'all', {{'quantity', '>', 1}}}), {2})
+                expect.table_eq(matching(jobs, {elements, 'any', {{'item_type', '==', df.item_type.BAR},
+                                                                 {'quantity', '==', 5}}}), {1})
+                expect.table_eq(matching(jobs, {elements, 'any', {{'item_type', '==', df.item_type.WOOD},
+                                                                 {'quantity', '==', 5}}}), {})
+                expect.table_eq(matching(jobs, {elements, 'any', {{'or', {'quantity', '==', 2},
+                                                                         {'quantity', '==', 100}}}}), {1})
+                expect.table_eq(matching(jobs, {elements, 'any', {{'flags1.improvable', '==', true},
+                                                                 {'_index', '>', 2}}}), {1})
+                -- one inside another
+                expect.table_eq(matching(jobs, {elements, 'any', {{'contains', 'any', {{'_value', '==', 4}}}}}), {})
+                job.job_items.elements[3].contains:insert('#', 4)
+                expect.table_eq(matching(jobs, {elements, 'any', {{'contains', 'any', {{'_value', '==', 4}}}}}), {1})
+                expect.table_eq(matching(jobs, {elements, 'any', {{'contains._size', '==', 1}}}), {1})
+
+                -- entries that are null pointers are passed over
+                job.items:insert('#', df.NULL)
+                expect.table_eq(matching(jobs, {'items', 'all', {{'job_item_idx', '>=', 2}}}), {1, 2})
+                expect.table_eq(matching(jobs, {'items', 'any', {{'job_item_idx', '==', 2}}}), {1})
+                job.items:erase(#job.items - 1)
+
+                local read = df.prepareReadFields(df.job, {fields={'_index'},
+                                                           where={{elements, 'any', {{'quantity', '==', 7}}}}})
+                for _ = 1, 2 do
+                    local out, n = read(jobs)
+                    expect.table_eq(column(out, '_index', n), {1})
+                end
+            end)
+
+            expect.error_match('not a container or an array', function() matching(list, {'id', 'any', {}}) end)
+            expect.error_match('needs a list of conditions', function() matching(list, {products, 'any', 5}) end)
+            expect.error_match('must be a table', function()
+                matching(list, {products, 'any', {'_value', '==', 1}})
+            end)
+            expect.error_match("no field 'nope'", function() matching({job}, {'job_items.elements', 'any', {{'nope', '==', 1}}}) end)
+        end)
+    end)
+end
+
+function test.pointers_compared_with_objects()
+    with_job(function(job)
+        local other = df.job:new()
+        local link = df.job_list_link:new()
+        job.list_link = link
+        dfhack.with_finalize(
+            function()
+                job.list_link = nil
+                link:delete()
+                other:delete()
+            end,
+            function()
+                local function matching(cond)
+                    local out, n = df.readFields({job, other}, {fields={'_index'}, where={cond}})
+                    return column(out, '_index', n)
+                end
+                expect.table_eq(matching{'list_link', '==', link}, {1})
+                expect.table_eq(matching{'list_link', '~=', link}, {2})
+                expect.table_eq(matching{'list_link', '==', df.NULL}, {2})
+                expect.table_eq(matching{'list_link', '==', job}, {})
+                expect.error_match('or an object', function() matching{'list_link', '==', 5} end)
+                expect.error_match('or an object', function() matching{'list_link', '<', link} end)
+            end)
     end)
 end

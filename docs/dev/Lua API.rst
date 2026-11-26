@@ -533,20 +533,62 @@ The ``df`` table itself contains the following functions and values:
   table are read side by side, a range needs them to be arranged the same way
   (all 16x16, say).
 
+  Objects that are not in one container can be read too. Pass a list of them,
+  for example the units a script has already picked out. They must be
+  structures of one type, or of classes that derive from one class, and
+  ``_index`` is then the place of the object in the list, from 1. A list of
+  objects cannot have names or ranges::
+
+    local out, n = df.readFields(my_units,
+        {fields={'id', 'pos.x', 'pos.y'}, where={{'flags1.inactive', '==', false}}})
+
+  A linked list is read by passing its first link, or any link to start
+  from, for example ``df.global.world.jobs.list``. The entries are the items
+  of the links, links without an item are passed over, and ``_index`` counts
+  the items from 0::
+
+    local out, n = df.readFields(df.global.world.jobs.list,
+        {fields={'id', 'job_type'}, where={{'flags.suspend', '==', true}}})
+
   ``options`` is a table that can contain:
 
   ``fields``
     A list of field names to read. A name is a path of steps separated by
-    dots. A step can be a field of a structure (``pos.x``), a pointer field,
-    which is followed (``item.id``), a flag of a bitfield
-    (``flags.DEAD``), or an attribute of an enum value
-    (``item_type.caption``). A bitfield named without a flag is read as its
-    whole numeric value. ``_index`` is the 0-based index of the entry in its
-    container, ``_from`` is the 1-based place of that container in the list
-    that was passed in (1 when it was not a list), and
-    ``_value`` is the entry itself when the container holds plain values.
-    Fields that hold containers, arrays or structures cannot be read. When a
-    pointer on the path is null, the value is *nil*.
+    dots. A step can be:
+
+    - a field of a structure (``pos.x``), or a pointer field, which is
+      followed (``item.id``)
+    - a flag of a bitfield (``flags.DEAD``) or of a flag array
+      (``flags.IS_METAL``); a bitfield named without a flag is read as its
+      whole numeric value
+    - an attribute of an enum value (``item_type.caption``)
+    - one entry of an array or a vector inside the entry, by its 0-based
+      number or, when the array is indexed by an enum, by the name of the key
+      (``state_name.Solid``, ``general_refs.0.unit_id``); the value is *nil*
+      when a vector has no such entry
+    - ``_size``, the number of entries of an array or a vector
+      (``inventory._size``)
+    - ``_type``, the type of an object, which for an object of a class is its
+      actual class, as ``object._type`` gives it
+    - ``_target``, after a field that holds the id of an object: the object
+      with that id, found the way the ``find`` function of its type finds it,
+      and *nil* when there is none (``hist_figure_id._target.name.first_name``)
+    - a method that takes no arguments, written with ``()``, as the last step
+      (``getType()``, ``item.getQuality()``). A method runs game code for
+      every entry, so it is slower than a field, and it must be one that is
+      safe to call from Lua.
+
+    ``_index`` is the 0-based index of the entry in its container, ``_from``
+    is the 1-based place of that container in the list that was passed in (1
+    when it was not a list), and ``_value`` is the entry itself, and can
+    start a path (``_value.Solid``).
+
+    A path that ends at a single value gives a number, a boolean or text. One
+    that ends at a structure, a container, an array or a flag array gives what
+    reading that field in Lua gives: a reference to it. That costs an
+    allocation for each entry, like any reference. A path that ends at a
+    pointer gives a reference to what it points to. When a pointer on the path
+    is null, the value is *nil*.
 
     When the entries are objects of a class that has derived classes, a field
     that only a derived class has can be named too, and its value is *nil* for
@@ -557,8 +599,32 @@ The ``df`` table itself contains the following functions and values:
   ``where``
     A list of conditions; only entries that pass all of them are returned.
     A condition is ``{field, comparison, value}``, where ``field`` is a name as
-    described above and ``comparison`` is one of ``==``, ``~=``, ``<``, ``<=``,
-    ``>``, ``>=``, or ``in`` (``value`` is then a list of accepted values).
+    described above and ``comparison`` is one of:
+
+    - ``==``, ``~=``, ``<``, ``<=``, ``>``, ``>=``. The value may be
+      ``{field='path'}`` to compare with another field of the same entry:
+      ``{'stack_size', '<', {field='subtype.stack_size'}}``.
+    - ``in``, with a list of accepted values, or ``in_keys``, with a table that
+      has the accepted values as keys (any key whose value is not false), the
+      form in which Lua code usually keeps a set
+    - ``startswith``, ``endswith`` and ``contains``, for a field that holds
+      text. The text is looked for as it stands, not as a pattern, and upper
+      and lower case differ.
+    - ``any`` and ``all``, for a path that ends at a vector or an array. The
+      value is a list of conditions on the entries of that vector, written
+      like ``where`` itself, with paths that start at the entry and ``_value``
+      and ``_index`` for the entry and its number. ``any`` holds when at least
+      one entry passes all of them, ``all`` when no entry fails them (so also
+      when there are no entries). Null pointers in the vector are passed
+      over::
+
+        {'general_refs', 'any', {{'_type', '==', df.general_ref_unit_workerst}}}
+        {'inventory', 'all', {{'mode', '~=', df.inv_item_role_type.Weapon}}}
+
+    - ``is_instance``, for a path that ends in ``_type``, with a type as the
+      value: whether the object is of that type or of a class derived from
+      it. ``==`` and ``~=`` on such a path ask for exactly that type.
+
     Conditions can be combined with ``{'and', c1, c2, ...}``,
     ``{'or', c1, c2, ...}`` and ``{'not', c}``. Without ``where``, or with an
     empty list, every entry passes.
@@ -572,17 +638,27 @@ The ``df`` table itself contains the following functions and values:
     or when the entry is not of the class that has the field.
 
     To ask whether a pointer field is null, compare the pointer itself with
-    ``df.NULL``, using ``==`` or ``~=``: ``{'item', '~=', df.NULL}``. This is
-    the only thing a condition can do with a path that ends at a pointer.
-    ``_from`` cannot be used in a condition.
+    ``df.NULL``, using ``==`` or ``~=``: ``{'item', '~=', df.NULL}``. A pointer
+    can be compared in the same way with an object, to ask whether it points
+    to that object. These are the only things a condition can do with a path
+    that ends at a pointer. ``_from`` cannot be used in a condition.
 
-    All conditions are checked inside DFHack, without calling into Lua.
+    All conditions are checked inside DFHack, without calling into Lua. What
+    they cannot express (arithmetic, calls to ``dfhack`` functions, methods
+    that take arguments) goes in ``test``.
 
   ``test``
     A function that is called with the 0-based index of each entry that passed
     ``where``, and returns whether to keep it. Use it only for checks that
     ``where`` cannot express, since it is called once per entry. It must not
     change the number of entries in the container.
+
+  ``limit``
+    The largest number of entries to return, a whole number of at least 1.
+    The read stops as soon as it has that many, so ``limit=1`` finds the
+    first entry that passes.
+
+  Any other key in ``options`` is an error.
 
   Returns ``out, n``. ``n`` is the number of entries returned, and ``out`` is a
   table with one array for each name in ``fields``, keyed by that name and
@@ -602,6 +678,9 @@ The ``df`` table itself contains the following functions and values:
   on every call. The options are taken in when the
   read is set up; changing the options table afterwards has no effect on it.
   The container passed here only shows what kind of container will be read.
+  For a read of a list of objects, pass a list with one object in it, or
+  just the type (``df.unit``); the function then takes lists of objects of
+  that type or of classes derived from it.
   Like ``df.readFields``, this function is experimental::
 
     local read_flows = df.prepareReadFields(block.flows,

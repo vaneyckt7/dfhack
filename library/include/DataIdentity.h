@@ -159,6 +159,8 @@ namespace DFHack
         // The item count and an item's address, for readers that do not go through a Lua metamethod.
         int raw_item_count(void *ptr) const { return item_count(ptr, COUNT_LEN); }
         void *raw_item_pointer(const type_identity *item, void *ptr, int idx) const { return item_pointer(item, ptr, idx); }
+        // The number of items that can be read by index, or -1 when any index can be.
+        int raw_read_count(void *ptr) const { return item_count(ptr, COUNT_READ); }
 
     protected:
         virtual int item_count(void *ptr, CountMode cnt) const = 0;
@@ -194,6 +196,9 @@ namespace DFHack
         virtual void lua_item_reference(lua_State *state, int fname_idx, void *ptr, int idx) const override;
         virtual void lua_item_read(lua_State *state, int fname_idx, void *ptr, int idx) const override;
         virtual void lua_item_write(lua_State *state, int fname_idx, void *ptr, int idx, int val_index) const override;
+
+        // One bit, for readers that do not go through a Lua metamethod.
+        bool raw_item_bit(void *ptr, int idx) const { return get_item(ptr, idx); }
 
     protected:
         virtual void *item_pointer(const type_identity *, void *, int) const override { return NULL; }
