@@ -68,8 +68,8 @@ Template for new versions:
 ## API
 
 ## Lua
-- ``df.readFields``: read chosen fields from every entry of a container (or of several same-sized containers) into flat arrays in one native call, optionally keeping only the entries that pass a set of conditions, and optionally limited to a range of indexes (``_range``) so that other entries are not visited
-- ``df.prepareReadFields``: set a ``df.readFields`` read up once and reuse it, for code that repeats the same read
+- ``df.read_fields``: read chosen fields from every entry of a container (or of several same-sized containers) into flat arrays in one native call, optionally keeping only the entries that pass a set of conditions, and optionally limited to a range of indexes (``_range``) so that other entries are not visited
+- ``df.prepare_read_fields``: set a ``df.read_fields`` read up once and reuse it, for code that repeats the same read
 
 ## Removed
 

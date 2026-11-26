@@ -457,7 +457,7 @@ The ``df`` table itself contains the following functions and values:
 
   Returns *nil* if NULL, or a ref.
 
-* ``df.readFields(container[, options[, out]])``
+* ``df.read_fields(container[, options[, out]])``
 
   Reads chosen fields from every entry of a container into flat Lua arrays in
   one call, which is much faster than indexing each entry from Lua. This
@@ -476,7 +476,7 @@ The ``df`` table itself contains the following functions and values:
   of entries, which are then read side by side. Every field name then starts
   with the name of the container it refers to::
 
-    local out, n = df.readFields(
+    local out, n = df.read_fields(
         {tt=block.tiletype, des=block.designation},
         {fields={'_index', 'des.flow_size'},
          where={{'tt.shape', '==', df.tiletype_shape.FLOOR},
@@ -493,7 +493,7 @@ The ``df`` table itself contains the following functions and values:
   container, and the names of the first; other names in later tables are
   ignored); they need not hold the same number of entries. An empty list reads nothing::
 
-    local out, n = df.readFields(
+    local out, n = df.read_fields(
         {block_a.flows, block_b.flows},
         {fields={'_from', 'type', 'density'}, where={{'density', '>', 0}}})
 
@@ -516,7 +516,7 @@ The ``df`` table itself contains the following functions and values:
   reads the tiles from x 2 to 4 and y 3 to 5 of two map blocks, each with
   its own rectangle::
 
-    local out, n = df.readFields(
+    local out, n = df.read_fields(
         {{des=block_a.designation, tt=block_a.tiletype, _range={2, 4, 3, 5}},
          {des=block_b.designation, tt=block_b.tiletype, _range={0, 15, 10, 15}}},
         {fields={'_from', '_index', 'des.flow_size'}, where={{'tt.shape', '==', df.tiletype_shape.FLOOR}}})
@@ -534,7 +534,7 @@ The ``df`` table itself contains the following functions and values:
   ``_index`` is then the place of the object in the list, from 1. A list of
   objects cannot have names or ranges::
 
-    local out, n = df.readFields(my_units,
+    local out, n = df.read_fields(my_units,
         {fields={'id', 'pos.x', 'pos.y'}, where={{'flags1.inactive', '==', false}}})
 
   A linked list is read by passing its first link, or any link to start
@@ -542,7 +542,7 @@ The ``df`` table itself contains the following functions and values:
   of the links, links without an item are passed over, and ``_index`` counts
   the items from 0::
 
-    local out, n = df.readFields(df.global.world.jobs.list,
+    local out, n = df.read_fields(df.global.world.jobs.list,
         {fields={'id', 'job_type'}, where={{'flags.suspend', '==', true}}})
 
   ``options`` is a table that can contain:
@@ -671,7 +671,7 @@ The ``df`` table itself contains the following functions and values:
 
         -- the first idle citizen, without looking at the units after it
         local found
-        df.readFields(df.global.world.units.active, {
+        df.read_fields(df.global.world.units.active, {
             fields={'id', 'pos.x', 'pos.y'},
             where={{'job.current_job', '==', df.NULL}},
             each=function(id, x, y)
@@ -692,10 +692,10 @@ The ``df`` table itself contains the following functions and values:
   for are left as they are. Without
   ``fields``, only the count is useful.
 
-* ``df.prepareReadFields(container[, options])``
+* ``df.prepare_read_fields(container[, options])``
 
   Sets up a read once, for code that does the same read again and again.
-  Takes what ``df.readFields`` (above) takes, and returns a function
+  Takes what ``df.read_fields`` (above) takes, and returns a function
   ``read(container[, out])`` that does that read on any container,
   table of named containers, or list of them, of the same kind as the one
   given here, and returns ``out, n`` in the same way. The ranges in ``_range``
@@ -706,9 +706,9 @@ The ``df`` table itself contains the following functions and values:
   For a read of a list of objects, pass a list with one object in it, or
   just the type (``df.unit``); the function then takes lists of objects of
   that type or of classes derived from it.
-  Like ``df.readFields``, this function is experimental::
+  Like ``df.read_fields``, this function is experimental::
 
-    local read_flows = df.prepareReadFields(block.flows,
+    local read_flows = df.prepare_read_fields(block.flows,
         {fields={'type', 'density'}, where={{'density', '>', 0}}})
     -- later, as often as needed
     local out, n = read_flows(other_block.flows, out)

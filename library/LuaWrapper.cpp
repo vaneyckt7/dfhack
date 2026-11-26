@@ -754,7 +754,7 @@ static int meta_new(lua_State *state)
 }
 
 /*
- * df.readFields: read chosen fields from every entry of a container in one call.
+ * df.read_fields: read chosen fields from every entry of a container in one call.
  */
 namespace {
 
@@ -877,10 +877,10 @@ void read_invoke(lua_State *state, const function_identity_base *fn, int base)
         fn->invoke(state, base);
     }
     catch (Error::All &e) {
-        luaL_error(state, "df.readFields: %s", e.what());
+        luaL_error(state, "df.read_fields: %s", e.what());
     }
     catch (std::exception &e) {
-        luaL_error(state, "df.readFields: C++ exception: %s", e.what());
+        luaL_error(state, "df.read_fields: C++ exception: %s", e.what());
     }
 }
 
@@ -1049,12 +1049,12 @@ const struct_identity *read_find_subclass(const struct_identity *type, const std
 void read_describe_source(lua_State *state, int idx, ReadSource &src)
 {
     if (lua_type(state, idx) != LUA_TUSERDATA)
-        luaL_error(state, "df.readFields: expected a container, or a table of named containers");
+        luaL_error(state, "df.read_fields: expected a container, or a table of named containers");
 
-    auto id = get_object_identity(state, idx, "df.readFields()", false, true);
+    auto id = get_object_identity(state, idx, "df.read_fields()", false, true);
     // stack: [metatable]
     if (!id->isContainer() || id->type() == IDTYPE_BIT_CONTAINER)
-        luaL_error(state, "df.readFields: %s is not a container it can read", id->getFullName().c_str());
+        luaL_error(state, "df.read_fields: %s is not a container it can read", id->getFullName().c_str());
 
     src.container = (const container_identity*)id;
     lua_getfield(state, -1, "_field_identity");
@@ -1063,7 +1063,7 @@ void read_describe_source(lua_State *state, int idx, ReadSource &src)
     int fixed = lua_isnil(state, -1) ? -1 : int(lua_tointeger(state, -1));
     lua_pop(state, 3);
     if (!src.item)
-        luaL_error(state, "df.readFields: the container's item type is not known");
+        luaL_error(state, "df.read_fields: the container's item type is not known");
 
     src.ptr = (uint8_t*)get_object_ref(state, idx);
     src.pointers = id->type() == IDTYPE_PTR_CONTAINER || id->type() == IDTYPE_STL_PTR_VECTOR;
@@ -1076,7 +1076,7 @@ void read_describe_source(lua_State *state, int idx, ReadSource &src)
         {
             auto buffer = (const df::buffer_container_identity*)src.leaf;
             if (!buffer->getItemType() || buffer->getSize() <= 0)
-                luaL_error(state, "df.readFields: cannot read a nested array of unknown shape");
+                luaL_error(state, "df.read_fields: cannot read a nested array of unknown shape");
             src.inner *= buffer->getSize();
             src.leaf = buffer->getItemType();
         }
@@ -1086,7 +1086,7 @@ void read_describe_source(lua_State *state, int idx, ReadSource &src)
     {
         auto target = ((const pointer_identity_base*)src.leaf)->getTarget();
         if (!target)
-            luaL_error(state, "df.readFields: cannot read a container of untyped pointers");
+            luaL_error(state, "df.read_fields: cannot read a container of untyped pointers");
         src.leaf_pointers = true;
         src.leaf = target;
     }
@@ -1112,7 +1112,7 @@ bool read_same_kind(const ReadSource &a, const ReadSource &b)
 lua_Integer read_bind(lua_State *state, const ReadPlan &plan, int idx, std::vector<ReadBound> &bound)
 {
     if (plan.named && !lua_istable(state, idx))
-        luaL_error(state, "df.readFields: expected a table of named containers");
+        luaL_error(state, "df.read_fields: expected a table of named containers");
     lua_Integer total = 0;
     for (size_t i = 0; i < plan.sources.size(); i++)
     {
@@ -1122,7 +1122,7 @@ lua_Integer read_bind(lua_State *state, const ReadPlan &plan, int idx, std::vect
             lua_pushlstring(state, want.name.data(), want.name.size());
             lua_rawget(state, idx);
             if (lua_isnil(state, -1))
-                luaL_error(state, "df.readFields: no container named '%s'", want.name.c_str());
+                luaL_error(state, "df.read_fields: no container named '%s'", want.name.c_str());
         }
         else
             lua_pushvalue(state, idx);
@@ -1130,14 +1130,14 @@ lua_Integer read_bind(lua_State *state, const ReadPlan &plan, int idx, std::vect
         read_describe_source(state, lua_gettop(state), now);
         lua_pop(state, 1);
         if (!read_same_kind(want, now))
-            luaL_error(state, "df.readFields: a container is not of the kind this read was set up for");
+            luaL_error(state, "df.read_fields: a container is not of the kind this read was set up for");
         bound[i].ptr = now.ptr;
         bound[i].outer = now.outer;
         lua_Integer count = lua_Integer(now.outer) * now.inner;
         if (i == 0)
             total = count;
         else if (count != total)
-            luaL_error(state, "df.readFields: the containers do not have the same number of entries");
+            luaL_error(state, "df.read_fields: the containers do not have the same number of entries");
     }
     return total;
 }
@@ -1320,7 +1320,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
     if (path == "_index")
     {
         if (use == USE_GROUP)
-            luaL_error(state, "df.readFields: '_index' is not a container");
+            luaL_error(state, "df.read_fields: '_index' is not a container");
         acc.kind = ReadAccessor::INDEX;
         acc.native = ReadAccessor::NATIVE_INT;
         acc.leaf = LEAF_INT;
@@ -1331,9 +1331,9 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
     if (path == "_from")
     {
         if (use == USE_GROUP)
-            luaL_error(state, "df.readFields: '_from' is not a container");
+            luaL_error(state, "df.read_fields: '_from' is not a container");
         if (plan.is_sub)
-            luaL_error(state, "df.readFields: '_from' cannot be used in the conditions of any or all");
+            luaL_error(state, "df.read_fields: '_from' cannot be used in the conditions of any or all");
         acc.kind = ReadAccessor::FROM;
         acc.native = ReadAccessor::NATIVE_INT;
         acc.leaf = LEAF_INT;
@@ -1344,7 +1344,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
     std::vector<std::string> parts;
     split_string(&parts, path, ".");
     if (parts.empty() || parts[0].empty())
-        luaL_error(state, "df.readFields: empty field name");
+        luaL_error(state, "df.read_fields: empty field name");
 
     size_t at = 0;
     if (plan.named)
@@ -1360,7 +1360,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             }
         }
         if (!found)
-            luaL_error(state, "df.readFields: '%s' does not start with the name of a container", path.c_str());
+            luaL_error(state, "df.read_fields: '%s' does not start with the name of a container", path.c_str());
         at = 1;
     }
     else if (parts[0] == "_value")
@@ -1390,7 +1390,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             // a pointer met inside an array or a container
             auto target = ((const pointer_identity_base*)cur)->getTarget();
             if (!target)
-                luaL_error(state, "df.readFields: '%s' goes through an untyped pointer", path.c_str());
+                luaL_error(state, "df.read_fields: '%s' goes through an untyped pointer", path.c_str());
             acc.offsets.push_back(0);
             acc.hops.push_back(ReadHop());
             cur = target;
@@ -1420,7 +1420,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             // the value is the id of an object, which is looked up as the type's find() does
             auto target = acc.kind == ReadAccessor::VALUE && acc.attrs.empty() ? value_target : nullptr;
             if (!target || !read_is_struct(target))
-                luaL_error(state, "df.readFields: '_target' in '%s' follows something that is not the id of "
+                luaL_error(state, "df.read_fields: '_target' in '%s' follows something that is not the id of "
                                   "an object", path.c_str());
             auto find = read_find_field((const struct_identity*)target, "find");
             auto fn = find && find->mode == struct_field_info::CLASS_METHOD ?
@@ -1430,7 +1430,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             hop.find = fn;
             hop.id_size = read_integer_size(state, acc.type, hop.id_signed);
             if (!fn || fn->getNumArgs() != 1 || !hop.id_size)
-                luaL_error(state, "df.readFields: '_target' in '%s': %s cannot be looked up by id", path.c_str(),
+                luaL_error(state, "df.read_fields: '_target' in '%s': %s cannot be looked up by id", path.c_str(),
                            target->getFullName().c_str());
             acc.offsets.push_back(0);
             acc.hops.push_back(hop);
@@ -1446,11 +1446,11 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
         {
             // a step past a value looks the value up in its enum's attributes
             if (!owner || !owner->getAttrs() || !owner->getAttrType())
-                luaL_error(state, "df.readFields: '%s' in '%s' follows a value that has no attributes",
+                luaL_error(state, "df.read_fields: '%s' in '%s' follows a value that has no attributes",
                            part.c_str(), path.c_str());
             auto field = read_find_field(owner->getAttrType(), part);
             if (!field || field->mode != struct_field_info::PRIMITIVE || !field->type || !read_is_value(field->type))
-                luaL_error(state, "df.readFields: no readable attribute '%s' in '%s'", part.c_str(), path.c_str());
+                luaL_error(state, "df.read_fields: no readable attribute '%s' in '%s'", part.c_str(), path.c_str());
             acc.attrs.push_back(ReadAttr{owner, field, 0, false});
             owner = field->type->type() == IDTYPE_ENUM ? (const enum_identity*)field->type : nullptr;
             continue;
@@ -1469,12 +1469,12 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             }
             int64_t index;
             if (!read_step_index(part, seq.index_enum, index))
-                luaL_error(state, "df.readFields: '%s' in '%s' must be the index of an entry, or '_size'",
+                luaL_error(state, "df.read_fields: '%s' in '%s' must be the index of an entry, or '_size'",
                            part.c_str(), path.c_str());
             if (!seq.entry)
-                luaL_error(state, "df.readFields: '%s' goes through an untyped pointer", path.c_str());
+                luaL_error(state, "df.read_fields: '%s' goes through an untyped pointer", path.c_str());
             if (index < 0 || (!seq.container && index >= seq.count))
-                luaL_error(state, "df.readFields: '%s' in '%s' is outside the array", part.c_str(), path.c_str());
+                luaL_error(state, "df.read_fields: '%s' in '%s' is outside the array", part.c_str(), path.c_str());
             if (seq.container)
             {
                 ReadHop hop;
@@ -1506,7 +1506,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
         {
             int64_t index;
             if (!read_step_index(part, flags_enum, index) || index < 0 || index > INT_MAX)
-                luaL_error(state, "df.readFields: no flag '%s' in '%s'", part.c_str(), path.c_str());
+                luaL_error(state, "df.read_fields: no flag '%s' in '%s'", part.c_str(), path.c_str());
             acc.kind = ReadAccessor::FLAG;
             acc.flags = flags;
             acc.flag = int(index);
@@ -1538,7 +1538,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                 if (cur->type() == IDTYPE_CLASS)
                     narrowed = read_find_subclass(owner_type, class_name);
                 if (!narrowed)
-                    luaL_error(state, "df.readFields: '%s' in '%s' does not name a class derived from %s",
+                    luaL_error(state, "df.read_fields: '%s' in '%s' does not name a class derived from %s",
                                class_name.c_str(), path.c_str(), cur->getFullName().c_str());
             }
             auto field = read_find_field(narrowed ? narrowed : owner_type, field_name);
@@ -1547,7 +1547,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                 std::vector<const struct_identity*> found;
                 read_find_in_subclasses(owner_type, field_name, found);
                 if (found.size() > 1)
-                    luaL_error(state, "df.readFields: several classes derived from %s have a field '%s'; "
+                    luaL_error(state, "df.read_fields: several classes derived from %s have a field '%s'; "
                                       "write it as Class:%s in '%s'", cur->getFullName().c_str(),
                                field_name.c_str(), field_name.c_str(), path.c_str());
                 if (found.size() == 1)
@@ -1557,25 +1557,25 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                 }
             }
             if (!field)
-                luaL_error(state, "df.readFields: no field '%s' in %s (path '%s')", field_name.c_str(),
+                luaL_error(state, "df.read_fields: no field '%s' in %s (path '%s')", field_name.c_str(),
                            cur->getFullName().c_str(), path.c_str());
             if (narrowed)
             {
                 if (narrowed->type() != IDTYPE_CLASS)
-                    luaL_error(state, "df.readFields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
+                    luaL_error(state, "df.read_fields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
                 acc.checks.push_back(ReadCheck{acc.offsets.size() - 1, acc.offsets.back(),
                                                (const virtual_identity*)narrowed});
             }
             from_field = nullptr;
             if (field->mode == struct_field_info::OBJ_METHOD)
-                luaL_error(state, "df.readFields: '%s' in '%s' is a method, which a path cannot call; "
+                luaL_error(state, "df.read_fields: '%s' in '%s' is a method, which a path cannot call; "
                                   "call it in 'test' or 'each'", field_name.c_str(), path.c_str());
             switch (field->mode)
             {
             case struct_field_info::PRIMITIVE:
             case struct_field_info::SUBSTRUCT:
                 if (!field->type)
-                    luaL_error(state, "df.readFields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
+                    luaL_error(state, "df.read_fields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
                 acc.offsets.back() += field->offset;
                 cur = field->type;
                 value_target = field->extra ? field->extra->ref_target : nullptr;
@@ -1592,7 +1592,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                     break;
                 }
                 if (!field->type || (field->count & (PTRFLAG_IS_ARRAY | PTRFLAG_HAS_BAD_POINTERS)))
-                    luaL_error(state, "df.readFields: cannot follow the pointer '%s' in '%s'", part.c_str(), path.c_str());
+                    luaL_error(state, "df.read_fields: cannot follow the pointer '%s' in '%s'", part.c_str(), path.c_str());
                 acc.offsets.back() += field->offset;
                 acc.offsets.push_back(0);
                 acc.hops.push_back(ReadHop());
@@ -1618,11 +1618,11 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                 else if (read_seq_from_field(field, seq))
                     where = AT_SEQ;
                 else
-                    luaL_error(state, "df.readFields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
+                    luaL_error(state, "df.read_fields: cannot read '%s' in '%s'", part.c_str(), path.c_str());
                 break;
             case struct_field_info::STATIC_STRING:
                 if (for_cond || at + 1 != parts.size())
-                    luaL_error(state, "df.readFields: '%s' in '%s' is a fixed piece of text, which can only be "
+                    luaL_error(state, "df.read_fields: '%s' in '%s' is a fixed piece of text, which can only be "
                                       "handed back", part.c_str(), path.c_str());
                 acc.offsets.back() += field->offset;
                 acc.kind = ReadAccessor::REF;
@@ -1631,7 +1631,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
                 owner = nullptr;
                 break;
             default:
-                luaL_error(state, "df.readFields: '%s' in '%s' is not something that can be read",
+                luaL_error(state, "df.read_fields: '%s' in '%s' is not something that can be read",
                            part.c_str(), path.c_str());
             }
         }
@@ -1647,7 +1647,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             {
                 unsigned bit = 0;
                 if (!findBitfieldField(&bit, part, bits->getNumBits(), bits->getBits()))
-                    luaL_error(state, "df.readFields: no flag '%s' in '%s'", part.c_str(), path.c_str());
+                    luaL_error(state, "df.read_fields: no flag '%s' in '%s'", part.c_str(), path.c_str());
                 acc.kind = ReadAccessor::BIT;
                 acc.bit = bit;
                 acc.bit_size = std::max(1, bits->getBits()[bit].size);
@@ -1656,17 +1656,17 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             owner = nullptr;
         }
         else
-            luaL_error(state, "df.readFields: '%s' in '%s' follows something that has no fields",
+            luaL_error(state, "df.read_fields: '%s' in '%s' follows something that has no fields",
                        part.c_str(), path.c_str());
     }
 
     if (use == USE_GROUP)
     {
         if (done || where != AT_SEQ)
-            luaL_error(state, "df.readFields: '%s' is not a container or an array, which 'any' and 'all' need",
+            luaL_error(state, "df.read_fields: '%s' is not a container or an array, which 'any' and 'all' need",
                        path.c_str());
         if (!seq.entry)
-            luaL_error(state, "df.readFields: '%s' holds untyped pointers", path.c_str());
+            luaL_error(state, "df.read_fields: '%s' holds untyped pointers", path.c_str());
         acc.kind = ReadAccessor::GROUP;
         acc.seq = seq;
         acc.seq_target = seq_target;
@@ -1679,7 +1679,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             acc.whole_size = cur->byte_size();
         }
         else if (for_cond)
-            luaL_error(state, "df.readFields: '%s' is not a single value; name one of its fields", path.c_str());
+            luaL_error(state, "df.read_fields: '%s' is not a single value; name one of its fields", path.c_str());
         else if (where != AT_TYPE || read_is_struct(cur))
         {
             // handed back as Lua reads it: a reference to the structure, the container or the array
@@ -1688,7 +1688,7 @@ size_t read_compile(lua_State *state, ReadPlan &plan, const std::string &path, R
             acc.type = cur;
         }
         else
-            luaL_error(state, "df.readFields: '%s' is not something that can be read", path.c_str());
+            luaL_error(state, "df.read_fields: '%s' is not something that can be read", path.c_str());
     }
 
     // How the value lies in memory. Conditions on integers and flags are the common case and take
@@ -2327,17 +2327,17 @@ void read_add_to_set(lua_State *state, ReadCond &cond, int idx)
 size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
 {
     if (depth > 32)
-        luaL_error(state, "df.readFields: conditions are nested too deeply");
-    luaL_checkstack(state, 10, "df.readFields: conditions are nested too deeply");
+        luaL_error(state, "df.read_fields: conditions are nested too deeply");
+    luaL_checkstack(state, 10, "df.read_fields: conditions are nested too deeply");
     if (!lua_istable(state, idx))
-        luaL_error(state, "df.readFields: each condition must be a table");
+        luaL_error(state, "df.read_fields: each condition must be a table");
 
     ReadCond cond;
     lua_rawgeti(state, idx, 1);
     lua_rawgeti(state, idx, 2);
     // stack: [head, second]
     if (lua_type(state, -2) != LUA_TSTRING)
-        luaL_error(state, "df.readFields: a condition must start with a field name, 'and', 'or' or 'not'");
+        luaL_error(state, "df.read_fields: a condition must start with a field name, 'and', 'or' or 'not'");
     std::string head = lua_tostring(state, -2);
 
     if ((lua_istable(state, -1) && (head == "and" || head == "or" || head == "not")) ||
@@ -2346,7 +2346,7 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
         cond.kind = head == "and" ? ReadCond::AND : head == "or" ? ReadCond::OR : ReadCond::NOT;
         int count = int(lua_rawlen(state, idx));
         if (cond.kind == ReadCond::NOT && count != 2)
-            luaL_error(state, "df.readFields: 'not' takes exactly one condition");
+            luaL_error(state, "df.read_fields: 'not' takes exactly one condition");
         for (int i = 2; i <= count; i++)
         {
             lua_rawgeti(state, idx, i);
@@ -2358,7 +2358,7 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
     else
     {
         if (lua_type(state, -1) != LUA_TSTRING)
-            luaL_error(state, "df.readFields: the condition on '%s' has no comparison", head.c_str());
+            luaL_error(state, "df.read_fields: the condition on '%s' has no comparison", head.c_str());
         std::string op = lua_tostring(state, -1);
         lua_pop(state, 2);
 
@@ -2410,7 +2410,7 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             cond.kind = ReadCond::TYPEIS;
         }
         else
-            luaL_error(state, "df.readFields: unknown comparison '%s' on '%s'", op.c_str(), head.c_str());
+            luaL_error(state, "df.read_fields: unknown comparison '%s' on '%s'", op.c_str(), head.c_str());
 
         const bool group = cond.kind == ReadCond::ANY || cond.kind == ReadCond::ALL;
         cond.accessor = read_compile(state, plan, head, group ? USE_GROUP : USE_COND);
@@ -2423,7 +2423,7 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
         {
             // the conditions are set up as a read of the entries of the container
             if (!lua_istable(state, -1))
-                luaL_error(state, "df.readFields: '%s' on '%s' needs a list of conditions", op.c_str(), head.c_str());
+                luaL_error(state, "df.read_fields: '%s' on '%s' needs a list of conditions", op.c_str(), head.c_str());
             int list_idx = lua_gettop(state);
             ReadPlan sub;
             sub.is_sub = true;
@@ -2449,21 +2449,21 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             if (cond.kind == ReadCond::CMP && !ordered)
                 cond.exact = true;
             else if (cond.kind != ReadCond::TYPEIS)
-                luaL_error(state, "df.readFields: '%s' is a type, which can only be tested with ==, ~= or "
+                luaL_error(state, "df.read_fields: '%s' is a type, which can only be tested with ==, ~= or "
                                   "is_instance", head.c_str());
             auto wanted = lua_istable(state, -1) ? read_peek_identity(state, -1) : nullptr;
             if (!wanted || !read_is_struct(wanted))
-                luaL_error(state, "df.readFields: the condition on '%s' needs a type, such as df.unit", head.c_str());
+                luaL_error(state, "df.read_fields: the condition on '%s' needs a type, such as df.unit", head.c_str());
             cond.kind = ReadCond::TYPEIS;
             cond.wanted = (const struct_identity*)wanted;
         }
         else if (cond.kind == ReadCond::TYPEIS)
-            luaL_error(state, "df.readFields: is_instance needs a path that ends in '_type', which '%s' does not",
+            luaL_error(state, "df.read_fields: is_instance needs a path that ends in '_type', which '%s' does not",
                        head.c_str());
         else if (acc.kind == ReadAccessor::PTR)
         {
             if (cond.kind != ReadCond::CMP || ordered)
-                luaL_error(state, "df.readFields: '%s' is a pointer, which can only be compared with df.NULL "
+                luaL_error(state, "df.read_fields: '%s' is a pointer, which can only be compared with df.NULL "
                                   "or an object, using == or ~=", head.c_str());
             if (lua_type(state, -1) == LUA_TLIGHTUSERDATA && lua_touserdata(state, -1) == nullptr)
                 cond.kind = ReadCond::ISNULL;
@@ -2473,16 +2473,16 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
                 cond.address = get_object_ref(state, lua_gettop(state));
             }
             else
-                luaL_error(state, "df.readFields: '%s' is a pointer, which can only be compared with df.NULL "
+                luaL_error(state, "df.read_fields: '%s' is a pointer, which can only be compared with df.NULL "
                                   "or an object, using == or ~=", head.c_str());
         }
         else if (acc.leaf == LEAF_OTHER)
-            luaL_error(state, "df.readFields: '%s' holds a kind of value that conditions cannot compare", head.c_str());
+            luaL_error(state, "df.read_fields: '%s' holds a kind of value that conditions cannot compare", head.c_str());
         else if (cond.kind == ReadCond::TEXT)
         {
             if ((acc.leaf != LEAF_STRING && acc.leaf != LEAF_CSTRING) ||
                 lua_type(state, -1) != LUA_TSTRING)
-                luaL_error(state, "df.readFields: '%s' on '%s' needs a field that holds text, and text to look for",
+                luaL_error(state, "df.read_fields: '%s' on '%s' needs a field that holds text, and text to look for",
                            op.c_str(), head.c_str());
             size_t len;
             const char *text = lua_tolstring(state, -1, &len);
@@ -2495,8 +2495,8 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
         else if (cond.kind == ReadCond::IN)
         {
             if (!lua_istable(state, -1))
-                luaL_error(state, op == "in" ? "df.readFields: '%s' on '%s' needs a list of values"
-                                             : "df.readFields: '%s' on '%s' needs a table with the values as keys",
+                luaL_error(state, op == "in" ? "df.read_fields: '%s' on '%s' needs a list of values"
+                                             : "df.read_fields: '%s' on '%s' needs a table with the values as keys",
                            op.c_str(), head.c_str());
             if (op == "in_keys")
             {
@@ -2534,18 +2534,18 @@ size_t read_parse_cond(lua_State *state, ReadPlan &plan, int idx, int depth)
             cond.accessor2 = read_compile(state, plan, other, USE_COND);
             const ReadAccessor &acc2 = plan.accessors[cond.accessor2];
             if (acc2.kind == ReadAccessor::PTR || acc2.leaf == LEAF_OTHER)
-                luaL_error(state, "df.readFields: '%s' holds a kind of value that conditions cannot compare",
+                luaL_error(state, "df.read_fields: '%s' holds a kind of value that conditions cannot compare",
                            other.c_str());
             cond.kind = ReadCond::CMP2;
         }
         else
         {
             if (lua_istable(state, -1))
-                luaL_error(state, "df.readFields: the condition on '%s' has no usable value; a table must be "
+                luaL_error(state, "df.read_fields: the condition on '%s' has no usable value; a table must be "
                                   "{field='path'}", head.c_str());
             if (ordered ? !(lua_type(state, -1) == LUA_TNUMBER || lua_type(state, -1) == LUA_TSTRING)
                         : lua_isnil(state, -1))
-                luaL_error(state, "df.readFields: the condition on '%s' has no usable value", head.c_str());
+                luaL_error(state, "df.read_fields: the condition on '%s' has no usable value", head.c_str());
             ReadScalar value;
             read_scalar_from_lua(state, -1, value);
             cond.value_kind = value.kind;
@@ -2755,10 +2755,10 @@ ReadFrom read_from(lua_State *state, int idx)
 void read_parse_range(lua_State *state, const ReadPlan &plan, int idx, int outer, ReadRange &range)
 {
     if (!lua_istable(state, idx))
-        luaL_error(state, "df.readFields: a range must be a table of 2 or 4 whole numbers");
+        luaL_error(state, "df.read_fields: a range must be a table of 2 or 4 whole numbers");
     lua_Integer count = lua_Integer(lua_rawlen(state, idx));
     if (count != 2 && count != 4)
-        luaL_error(state, "df.readFields: a range must be a table of 2 or 4 whole numbers");
+        luaL_error(state, "df.read_fields: a range must be a table of 2 or 4 whole numbers");
     lua_Integer value[4] = {0, 0, 0, 0};
     for (int i = 0; i < count; i++)
     {
@@ -2768,15 +2768,15 @@ void read_parse_range(lua_State *state, const ReadPlan &plan, int idx, int outer
             value[i] = lua_tointegerx(state, -1, &is_whole);
         lua_pop(state, 1);
         if (!is_whole)
-            luaL_error(state, "df.readFields: the numbers in a range must be whole numbers");
+            luaL_error(state, "df.read_fields: the numbers in a range must be whole numbers");
     }
 
     const lua_Integer inner = plan.sources[0].inner;
     for (const ReadSource &src : plan.sources)
         if (src.inner != plan.sources[0].inner)
-            luaL_error(state, "df.readFields: a range needs containers that are all arranged the same way");
+            luaL_error(state, "df.read_fields: a range needs containers that are all arranged the same way");
     if (count == 4 && inner == 1)
-        luaL_error(state, "df.readFields: a range of 4 numbers needs a container of containers");
+        luaL_error(state, "df.read_fields: a range of 4 numbers needs a container of containers");
 
     lua_Integer first1 = value[0], last1 = value[1];
     lua_Integer first2 = 0, last2 = inner - 1;
@@ -2839,7 +2839,7 @@ bool read_describe_links(const type_identity *type, ReadSource &src)
 // function and then the each function, with nil for one there is none of.
 void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx, bool from_list)
 {
-    luaL_checkstack(state, 20, "df.readFields");
+    luaL_checkstack(state, 20, "df.read_fields");
     auto first_id = read_peek_identity(state, first_idx);
     if (first_id && read_is_struct(first_id))
     {
@@ -2871,7 +2871,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         else if (read_describe_links(first_id, src))
             src.ptr = (uint8_t*)get_object_ref(state, first_idx);
         else
-            luaL_error(state, "df.readFields: %s is not a container; to read objects, pass a list of them",
+            luaL_error(state, "df.read_fields: %s is not a container; to read objects, pass a list of them",
                        first_id->getFullName().c_str());
         plan.sources.push_back(src);
     }
@@ -2882,7 +2882,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         while (lua_next(state, first_idx))
         {
             if (lua_type(state, -2) != LUA_TSTRING)
-                luaL_error(state, "df.readFields: containers in a table must have string names");
+                luaL_error(state, "df.read_fields: containers in a table must have string names");
             std::string name = lua_tostring(state, -2);
             if (name == "_range")
             {
@@ -2891,12 +2891,12 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
                 continue;
             }
             if (name.empty() || name == "_index" || name == "_from" || name.find('.') != std::string::npos)
-                luaL_error(state, "df.readFields: '%s' cannot be used as a container name", name.c_str());
+                luaL_error(state, "df.read_fields: '%s' cannot be used as a container name", name.c_str());
             read_add_source(state, plan, lua_gettop(state), name);
             lua_pop(state, 1);
         }
         if (plan.sources.empty())
-            luaL_error(state, "df.readFields: no containers given");
+            luaL_error(state, "df.read_fields: no containers given");
     }
     else
         read_add_source(state, plan, first_idx, "");
@@ -2904,7 +2904,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
     lua_Integer total = lua_Integer(plan.sources[0].outer) * plan.sources[0].inner;
     for (const ReadSource &src : plan.sources)
         if (lua_Integer(src.outer) * src.inner != total)
-            luaL_error(state, "df.readFields: the containers do not have the same number of entries");
+            luaL_error(state, "df.read_fields: the containers do not have the same number of entries");
 
     lua_pushnil(state);
     const int test_idx = lua_gettop(state);
@@ -2920,7 +2920,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
             const char *key = lua_type(state, -1) == LUA_TSTRING ? lua_tostring(state, -1) : "";
             if (strcmp(key, "fields") && strcmp(key, "where") && strcmp(key, "test") && strcmp(key, "limit") &&
                 strcmp(key, "each"))
-                luaL_error(state, "df.readFields: unknown option '%s'; the options are fields, where, test, "
+                luaL_error(state, "df.read_fields: unknown option '%s'; the options are fields, where, test, "
                                   "limit and each", key);
         }
 
@@ -2931,7 +2931,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
             if (lua_type(state, -1) == LUA_TNUMBER)
                 plan.limit = lua_tointegerx(state, -1, &is_whole);
             if (!is_whole || plan.limit < 1)
-                luaL_error(state, "df.readFields: limit must be a whole number of at least 1");
+                luaL_error(state, "df.read_fields: limit must be a whole number of at least 1");
         }
         lua_pop(state, 1);
 
@@ -2939,7 +2939,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         if (!lua_isnil(state, -1))
         {
             if (!lua_isfunction(state, -1))
-                luaL_error(state, "df.readFields: test must be a function");
+                luaL_error(state, "df.read_fields: test must be a function");
             plan.has_test = true;
         }
         lua_replace(state, test_idx);
@@ -2948,7 +2948,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         if (!lua_isnil(state, -1))
         {
             if (!lua_isfunction(state, -1))
-                luaL_error(state, "df.readFields: each must be a function");
+                luaL_error(state, "df.read_fields: each must be a function");
             plan.has_each = true;
         }
         lua_replace(state, each_idx);
@@ -2957,7 +2957,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         if (!lua_isnil(state, -1))
         {
             if (!lua_istable(state, -1))
-                luaL_error(state, "df.readFields: where must be a table");
+                luaL_error(state, "df.read_fields: where must be a table");
             int where_idx = lua_gettop(state);
             ReadCond all;
             int count = int(lua_rawlen(state, where_idx));
@@ -2965,7 +2965,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
             {
                 lua_pushnil(state);
                 if (lua_next(state, where_idx))
-                    luaL_error(state, "df.readFields: where must be a list of conditions");
+                    luaL_error(state, "df.read_fields: where must be a list of conditions");
             }
             for (int i = 1; i <= count; i++)
             {
@@ -2983,7 +2983,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
         if (!lua_isnil(state, -1))
         {
             if (!lua_istable(state, -1))
-                luaL_error(state, "df.readFields: fields must be a table");
+                luaL_error(state, "df.read_fields: fields must be a table");
             int count = int(lua_rawlen(state, -1));
             for (int i = 1; i <= count; i++)
             {
@@ -3001,22 +3001,22 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
                         lua_pop(state, 1);
                         const char *key = lua_type(state, -1) == LUA_TSTRING ? lua_tostring(state, -1) : "";
                         if (strcmp(key, "path") && strcmp(key, "as"))
-                            luaL_error(state, "df.readFields: a field given as a table must be "
+                            luaL_error(state, "df.read_fields: a field given as a table must be "
                                               "{path='...', as='...'}");
                     }
                     lua_getfield(state, entry_idx, "path");
                     lua_getfield(state, entry_idx, "as");
                     if (lua_type(state, -2) != LUA_TSTRING || lua_type(state, -1) != LUA_TSTRING)
-                        luaL_error(state, "df.readFields: a field given as a table must be "
+                        luaL_error(state, "df.read_fields: a field given as a table must be "
                                           "{path='...', as='...'}, both of them strings");
                     path = lua_tostring(state, -2);
                     name = lua_tostring(state, -1);
                     lua_pop(state, 2);
                     if (name.empty())
-                        luaL_error(state, "df.readFields: a field cannot be stored under an empty name");
+                        luaL_error(state, "df.read_fields: a field cannot be stored under an empty name");
                 }
                 else
-                    luaL_error(state, "df.readFields: a field must be a string or {path='...', as='...'}");
+                    luaL_error(state, "df.read_fields: a field must be a string or {path='...', as='...'}");
                 lua_pop(state, 1);
                 // a function gets its arguments by position, so a name given twice is passed twice
                 auto old = std::find(plan.names.begin(), plan.names.end(), name);
@@ -3026,7 +3026,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
                     plan.paths.push_back(path);
                 }
                 else if (plan.paths[old - plan.names.begin()] != path)
-                    luaL_error(state, "df.readFields: two different fields would be stored as '%s'", name.c_str());
+                    luaL_error(state, "df.read_fields: two different fields would be stored as '%s'", name.c_str());
             }
         }
         lua_pop(state, 1);
@@ -3043,7 +3043,7 @@ void read_setup(lua_State *state, ReadPlan &plan, int first_idx, int options_idx
 int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list, int out_idx, int test_idx,
              int each_idx, bool first_bound)
 {
-    luaL_checkstack(state, int(plan.names.size()) + 20, "df.readFields: too many fields");
+    luaL_checkstack(state, int(plan.names.size()) + 20, "df.read_fields: too many fields");
 
     // one array per field, each at a fixed stack index; none when the entries go to a function
     int column_base = lua_gettop(state);
@@ -3139,7 +3139,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
                 for (size_t i = 0; i < source_count; i++)
                     if (plan.sources[i].dynamic &&
                         plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
-                        luaL_error(state, "df.readFields: a container changed size during the read");
+                        luaL_error(state, "df.read_fields: a container changed size during the read");
                 // the function may have moved or replaced the entry
                 for (ReadCursor &cursor : cursors)
                     cursor.item_ok = false;
@@ -3172,7 +3172,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
                 for (size_t i = 0; i < source_count; i++)
                     if (plan.sources[i].dynamic &&
                         plan.sources[i].container->raw_item_count(bound[i].ptr) != bound[i].outer)
-                        luaL_error(state, "df.readFields: a container changed size during the read");
+                        luaL_error(state, "df.read_fields: a container changed size during the read");
                 for (ReadCursor &cursor : cursors)
                     cursor.item_ok = false;
             }
@@ -3195,7 +3195,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
     {
         const type_identity *wanted = plan.sources[0].leaf;
         if (!lua_istable(state, from_idx) || read_peek_identity(state, from_idx))
-            luaL_error(state, "df.readFields: this read was set up for a list of objects");
+            luaL_error(state, "df.read_fields: this read was set up for a list of objects");
         place = 1;
         lua_Integer count = lua_Integer(lua_rawlen(state, from_idx));
         for (lua_Integer i = 1; i <= count && !full; i++)
@@ -3203,7 +3203,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             lua_rawgeti(state, from_idx, i);
             auto id = lua_type(state, -1) == LUA_TUSERDATA ? read_peek_identity(state, -1) : nullptr;
             if (!id || !read_derives(id, wanted))
-                luaL_error(state, "df.readFields: entry %d of the list is not a %s", int(i),
+                luaL_error(state, "df.read_fields: entry %d of the list is not a %s", int(i),
                            wanted->getFullName().c_str());
             bases[0] = (uint8_t*)get_object_ref(state, lua_gettop(state));
             lua_pop(state, 1);
@@ -3215,7 +3215,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
     {
         const ReadSource &src = plan.sources[0];
         if (lua_type(state, from_idx) != LUA_TUSERDATA || read_peek_identity(state, from_idx) != src.link)
-            luaL_error(state, "df.readFields: this read was set up for a linked list of %s",
+            luaL_error(state, "df.read_fields: this read was set up for a linked list of %s",
                        src.link->getFullName().c_str());
         place = 1;
         uint8_t *link = (uint8_t*)get_object_ref(state, from_idx);
@@ -3309,7 +3309,7 @@ void read_check_out(lua_State *state, int idx)
         lua_replace(state, idx);
     }
     else if (!lua_istable(state, idx))
-        luaL_error(state, "df.readFields: out must be a table");
+        luaL_error(state, "df.read_fields: out must be a table");
 }
 
 }
@@ -3318,12 +3318,12 @@ static int meta_read_fields(lua_State *state)
 {
     int argc = lua_gettop(state);
     if (argc < 1 || argc > 3)
-        luaL_error(state, "Usage: df.readFields(container[, options[, out]])");
+        luaL_error(state, "Usage: df.read_fields(container[, options[, out]])");
     lua_settop(state, 3);
     if (!lua_isnil(state, 2) && !lua_istable(state, 2))
-        luaL_error(state, "df.readFields: options must be a table");
+        luaL_error(state, "df.read_fields: options must be a table");
     read_check_out(state, 3);
-    luaL_checkstack(state, 20, "df.readFields");
+    luaL_checkstack(state, 20, "df.read_fields");
 
     ReadFrom from = read_from(state, 1);
     if (from == READ_NOTHING)
@@ -3350,15 +3350,15 @@ static int read_plan_gc(lua_State *state)
     return 0;
 }
 
-// The function df.prepareReadFields returns. Upvalues: the type table, the plan, the test function, the each function.
+// The function df.prepare_read_fields returns. Upvalues: the type table, the plan, the test function, the each function.
 static int read_prepared_call(lua_State *state)
 {
     int argc = lua_gettop(state);
     if (argc < 1 || argc > 2)
-        luaL_error(state, "Usage: read(container[, out]), with read made by df.prepareReadFields");
+        luaL_error(state, "Usage: read(container[, out]), with read made by df.prepare_read_fields");
     lua_settop(state, 2);
     read_check_out(state, 2);
-    luaL_checkstack(state, 20, "df.readFields");
+    luaL_checkstack(state, 20, "df.read_fields");
 
     ReadFrom from = read_from(state, 1);
     if (from == READ_NOTHING)
@@ -3379,18 +3379,18 @@ static int meta_prepare_read_fields(lua_State *state)
 {
     int argc = lua_gettop(state);
     if (argc < 1 || argc > 2)
-        luaL_error(state, "Usage: df.prepareReadFields(container[, options])");
+        luaL_error(state, "Usage: df.prepare_read_fields(container[, options])");
     lua_settop(state, 2);
     if (!lua_isnil(state, 2) && !lua_istable(state, 2))
-        luaL_error(state, "df.readFields: options must be a table");
-    luaL_checkstack(state, 20, "df.readFields");
+        luaL_error(state, "df.read_fields: options must be a table");
+    luaL_checkstack(state, 20, "df.read_fields");
 
     ReadFrom from = read_from(state, 1);
     if (from == READ_NOTHING)
-        luaL_error(state, "df.readFields: no containers or objects given");
+        luaL_error(state, "df.read_fields: no containers or objects given");
 
     auto plan = new (lua_newuserdata(state, sizeof(ReadPlan))) ReadPlan();
-    if (luaL_newmetatable(state, "df.readFields.plan"))
+    if (luaL_newmetatable(state, "df.read_fields.plan"))
     {
         lua_pushcfunction(state, read_plan_gc);
         lua_setfield(state, -2, "__gc");
@@ -4590,9 +4590,9 @@ static int DoAttach(lua_State *state)
         lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_CAST_NAME);
         lua_setfield(state, -2, "reinterpret_cast");
         lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_READ_FIELDS_NAME);
-        lua_setfield(state, -2, "readFields");
+        lua_setfield(state, -2, "read_fields");
         lua_getfield(state, LUA_REGISTRYINDEX, DFHACK_PREPARE_READ_FIELDS_NAME);
-        lua_setfield(state, -2, "prepareReadFields");
+        lua_setfield(state, -2, "prepare_read_fields");
 
         lua_pushlightuserdata(state, NULL);
         lua_setfield(state, -2, "NULL");

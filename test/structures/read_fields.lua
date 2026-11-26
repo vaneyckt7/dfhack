@@ -41,7 +41,7 @@ end
 
 function test.all_entries()
     with_job(function(job, specs)
-        local out, n = df.readFields(job.job_items.elements,
+        local out, n = df.read_fields(job.job_items.elements,
             {fields={'_index', 'item_type', 'quantity', 'mat_index', 'flags1.improvable', 'flags1'}})
         expect.eq(n, #specs)
         for i, spec in ipairs(specs) do
@@ -58,12 +58,12 @@ end
 
 function test.count_only()
     with_job(function(job, specs)
-        local out, n = df.readFields(job.job_items.elements)
+        local out, n = df.read_fields(job.job_items.elements)
         expect.eq(n, #specs)
         expect.eq(next(out), nil)
-        out, n = df.readFields(job.job_items.elements, {where={}})
+        out, n = df.read_fields(job.job_items.elements, {where={}})
         expect.eq(n, #specs)
-        out, n = df.readFields(job.job_items.elements, {where={{'quantity', '>', 100}}})
+        out, n = df.read_fields(job.job_items.elements, {where={{'quantity', '>', 100}}})
         expect.eq(n, 0)
     end)
 end
@@ -71,7 +71,7 @@ end
 function test.comparisons()
     with_job(function(job)
         local function matches(where)
-            local out, n = df.readFields(job.job_items.elements, {fields={'_index'}, where=where})
+            local out, n = df.read_fields(job.job_items.elements, {fields={'_index'}, where=where})
             return column(out, '_index', n)
         end
         expect.table_eq(matches{{'quantity', '==', 3}}, {0})
@@ -94,7 +94,7 @@ end
 function test.combined_conditions()
     with_job(function(job)
         local function matches(where)
-            local out, n = df.readFields(job.job_items.elements, {fields={'_index'}, where=where})
+            local out, n = df.read_fields(job.job_items.elements, {fields={'_index'}, where=where})
             return column(out, '_index', n)
         end
         expect.table_eq(matches{{'or', {'quantity', '==', 1}, {'quantity', '==', 7}}}, {1, 2})
@@ -107,12 +107,12 @@ end
 
 function test.enum_attributes()
     with_job(function(job, specs)
-        local out, n = df.readFields(job.job_items.elements, {fields={'item_type.caption', 'item_type.is_rawable'}})
+        local out, n = df.read_fields(job.job_items.elements, {fields={'item_type.caption', 'item_type.is_rawable'}})
         for i, spec in ipairs(specs) do
             expect.eq(out['item_type.caption'][i], df.item_type.attrs[spec.item_type].caption)
             expect.eq(out['item_type.is_rawable'][i], df.item_type.attrs[spec.item_type].is_rawable)
         end
-        out, n = df.readFields(job.job_items.elements,
+        out, n = df.read_fields(job.job_items.elements,
             {fields={'_index'}, where={{'item_type.caption', '==', df.item_type.attrs.BAR.caption}}})
         expect.table_eq(column(out, '_index', n), {0, 3})
     end)
@@ -120,14 +120,14 @@ end
 
 function test.null_pointer_on_the_path()
     with_job(function(job)
-        local out, n = df.readFields(job.items, {fields={'job_item_idx', 'item.id'}})
+        local out, n = df.read_fields(job.items, {fields={'job_item_idx', 'item.id'}})
         expect.eq(n, 2)
         expect.table_eq(column(out, 'job_item_idx', n), {4, 2})
         expect.eq(out['item.id'][1], nil)
         expect.eq(out['item.id'][2], nil)
-        out, n = df.readFields(job.items, {where={{'item.id', '~=', 5}}})
+        out, n = df.read_fields(job.items, {where={{'item.id', '~=', 5}}})
         expect.eq(n, 0)
-        out, n = df.readFields(job.items, {where={{'not', {'item.id', '==', 5}}}})
+        out, n = df.read_fields(job.items, {where={{'not', {'item.id', '==', 5}}}})
         expect.eq(n, 2)
     end)
 end
@@ -136,7 +136,7 @@ function test.plain_values()
     local path = df.coord_path:new()
     dfhack.with_finalize(function() path:delete() end, function()
         for _, v in ipairs{5, -2, 9, 0} do path.x:insert('#', v) end
-        local out, n = df.readFields(path.x, {fields={'_value', '_index'}, where={{'_value', '>', 0}}})
+        local out, n = df.read_fields(path.x, {fields={'_value', '_index'}, where={{'_value', '>', 0}}})
         expect.eq(n, 2)
         expect.table_eq(column(out, '_value', n), {5, 9})
         expect.table_eq(column(out, '_index', n), {0, 2})
@@ -150,7 +150,7 @@ function test.comparisons_on_whole_numbers()
         local values = {5, -2, 9, 0, -32768, 32767, 9}
         for _, v in ipairs(values) do path.x:insert('#', v) end
         local function matches(where)
-            local out, n = df.readFields(path.x, {fields={'_index'}, where=where})
+            local out, n = df.read_fields(path.x, {fields={'_index'}, where=where})
             return column(out, '_index', n)
         end
         local function expected(keep)
@@ -184,7 +184,7 @@ function test.comparisons_on_whole_numbers()
     end)
     with_job(function(job)
         local function matches(where)
-            local out, n = df.readFields(job.job_items.elements, {fields={'_index'}, where=where})
+            local out, n = df.read_fields(job.job_items.elements, {fields={'_index'}, where=where})
             return column(out, '_index', n)
         end
         expect.table_eq(matches{{'flags1.improvable', '==', false}}, {0, 2, 4})
@@ -204,7 +204,7 @@ function test.comparisons_on_unsigned_and_attributes()
         block.temperature_1[3][0] = 32768
         block.temperature_1[15][15] = 32767
         local function matches(source, where)
-            local out, n = df.readFields(source, {fields={'_index'}, where=where})
+            local out, n = df.read_fields(source, {fields={'_index'}, where=where})
             return column(out, '_index', n)
         end
         local temp = block.temperature_1
@@ -242,7 +242,7 @@ function test.grids_read_together()
         block.designation[15][15].hidden = true
         local grids = {tt=block.tiletype, des=block.designation}
 
-        local out, n = df.readFields(grids, {fields={'tt', 'des.flow_size', 'des'}})
+        local out, n = df.read_fields(grids, {fields={'tt', 'des.flow_size', 'des'}})
         expect.eq(n, 256)
         for x = 0, 15 do
             for y = 0, 15 do
@@ -253,21 +253,21 @@ function test.grids_read_together()
             end
         end
 
-        out, n = df.readFields(grids, {fields={'_index', 'des.flow_size'},
+        out, n = df.read_fields(grids, {fields={'_index', 'des.flow_size'},
             where={{'tt.shape', '==', df.tiletype_shape.FLOOR}, {'des.hidden', '==', false}}})
         expect.eq(n, 1)
         expect.eq(out._index[1], 2 * 16 + 3)
         expect.eq(out['des.flow_size'][1], 7)
 
-        out, n = df.readFields(grids, {fields={'_index'}, where={{'des.flow_size', '>', 0}}})
+        out, n = df.read_fields(grids, {fields={'_index'}, where={{'des.flow_size', '>', 0}}})
         expect.table_eq(column(out, '_index', n), {2 * 16 + 3, 4 * 16})
 
-        out, n = df.readFields(grids, {fields={'_index'},
+        out, n = df.read_fields(grids, {fields={'_index'},
             where={{'tt.shape.basic_shape', '==', df.tiletype_shape_basic.Wall}}})
         expect.table_eq(column(out, '_index', n), {4 * 16})
 
         expect.error_match('same number of entries', function()
-            df.readFields({tt=block.tiletype, row=block.tiletype[0]})
+            df.read_fields({tt=block.tiletype, row=block.tiletype[0]})
         end)
     end)
 end
@@ -275,7 +275,7 @@ end
 function test.test_function()
     with_job(function(job)
         local seen = {}
-        local out, n = df.readFields(job.job_items.elements, {fields={'_index'},
+        local out, n = df.read_fields(job.job_items.elements, {fields={'_index'},
             where={{'quantity', '>', 2}},
             test=function(index)
                 table.insert(seen, index)
@@ -285,7 +285,7 @@ function test.test_function()
         expect.table_eq(column(out, '_index', n), {0, 3})
 
         expect.error_match('changed size', function()
-            df.readFields(job.items, {test=function()
+            df.read_fields(job.items, {test=function()
                 job.items:insert('#', {new=true})
                 return true
             end})
@@ -310,25 +310,25 @@ function test.subclass_fields()
             end,
             function()
                 -- a field of a derived class is nil for entries of another class
-                local out, n = df.readFields(refs, {fields={'unit_id', 'general_ref_building:building_id'}})
+                local out, n = df.read_fields(refs, {fields={'unit_id', 'general_ref_building:building_id'}})
                 expect.eq(n, 2)
                 expect.eq(out.unit_id[1], 7)
                 expect.eq(out.unit_id[2], nil)
                 expect.eq(out['general_ref_building:building_id'][1], nil)
                 expect.eq(out['general_ref_building:building_id'][2], 9)
 
-                out, n = df.readFields(refs, {fields={'_index'}, where={{'general_ref_building:building_id', '==', 9}}})
+                out, n = df.read_fields(refs, {fields={'_index'}, where={{'general_ref_building:building_id', '==', 9}}})
                 expect.table_eq(column(out, '_index', n), {1})
-                out, n = df.readFields(refs, {where={{'unit_id', '~=', 100}}})
+                out, n = df.read_fields(refs, {where={{'unit_id', '~=', 100}}})
                 expect.eq(n, 1)
 
                 -- two unrelated reference classes have a building_id, so the class must be named
-                expect.error_match('several classes', function() df.readFields(refs, {fields={'building_id'}}) end)
-                out, n = df.readFields(refs, {fields={'general_ref_unit:unit_id'}})
+                expect.error_match('several classes', function() df.read_fields(refs, {fields={'building_id'}}) end)
+                out, n = df.read_fields(refs, {fields={'general_ref_unit:unit_id'}})
                 expect.eq(out['general_ref_unit:unit_id'][1], 7)
                 expect.eq(out['general_ref_unit:unit_id'][2], nil)
                 expect.error_match('does not name a class', function()
-                    df.readFields(refs, {fields={'job_item:quantity'}})
+                    df.read_fields(refs, {fields={'job_item:quantity'}})
                 end)
             end)
     end)
@@ -340,7 +340,7 @@ function test.null_entries_are_skipped()
         local removed = items[1]
         items[1] = nil
         dfhack.with_finalize(function() items[1] = removed end, function()
-            local out, n = df.readFields(items, {fields={'_index', 'quantity'}})
+            local out, n = df.read_fields(items, {fields={'_index', 'quantity'}})
             expect.eq(n, 4)
             expect.table_eq(column(out, '_index', n), {0, 2, 3, 4})
             expect.table_eq(column(out, 'quantity', n), {3, 7, 5, 2})
@@ -353,7 +353,7 @@ function test.test_function_may_move_entries()
     dfhack.with_finalize(function() path:delete() end, function()
         for _, v in ipairs{5, -2, 9, 0} do path.x:insert('#', v) end
         -- growing and shrinking the vector moves its storage without changing its size
-        local out, n = df.readFields(path.x, {fields={'_value'}, test=function()
+        local out, n = df.read_fields(path.x, {fields={'_value'}, test=function()
             for _ = 1, 64 do path.x:insert('#', 0) end
             path.x:resize(4)
             return true
@@ -370,7 +370,7 @@ function test.many_conditions()
             where[i] = {'quantity', '>', -i}
             fields[i] = i % 2 == 0 and 'quantity' or 'mat_index'
         end
-        local out, n = df.readFields(job.job_items.elements, {fields=fields, where=where})
+        local out, n = df.read_fields(job.job_items.elements, {fields=fields, where=where})
         expect.eq(n, 5)
         expect.table_eq(column(out, 'mat_index', n), {10, 20, 30, 40, 50})
     end)
@@ -378,9 +378,9 @@ end
 
 function test.empty_groups()
     with_job(function(job)
-        local out, n = df.readFields(job.job_items.elements, {where={{'and'}}})
+        local out, n = df.read_fields(job.job_items.elements, {where={{'and'}}})
         expect.eq(n, 5)
-        out, n = df.readFields(job.job_items.elements, {where={{'or'}}})
+        out, n = df.read_fields(job.job_items.elements, {where={{'or'}}})
         expect.eq(n, 0)
     end)
 end
@@ -389,7 +389,7 @@ function test.out_is_reused()
     with_job(function(job)
         local out = {quantity={99, 98, 97, 96, 95, 94}, other={1}}
         local quantity = out.quantity
-        local same, n = df.readFields(job.job_items.elements, {fields={'quantity'}, where={{'quantity', '>', 4}}}, out)
+        local same, n = df.read_fields(job.job_items.elements, {fields={'quantity'}, where={{'quantity', '>', 4}}}, out)
         expect.eq(same, out)
         expect.eq(out.quantity, quantity)
         expect.eq(n, 2)
@@ -402,7 +402,7 @@ function test.repeated_fields()
     with_job(function(job)
         local fields = {}
         for i = 1, 300 do fields[i] = 'quantity' end
-        local out, n = df.readFields(job.job_items.elements, {fields=fields})
+        local out, n = df.read_fields(job.job_items.elements, {fields=fields})
         expect.eq(n, 5)
         expect.table_eq(column(out, 'quantity', n), {3, 1, 7, 5, 2})
     end)
@@ -411,41 +411,41 @@ end
 function test.errors()
     with_job(function(job)
         local items = job.job_items.elements
-        expect.error_match('Usage', function() df.readFields() end)
-        expect.error_match('expected a container', function() df.readFields(5) end)
-        expect.error_match('not a container', function() df.readFields(job) end)
-        expect.error_match('options must be a table', function() df.readFields(items, 5) end)
-        expect.error_match('out must be a table', function() df.readFields(items, {}, 5) end)
-        expect.error_match("no field 'nope'", function() df.readFields(items, {fields={'nope'}}) end)
-        expect.error_match("no flag 'nope'", function() df.readFields(items, {fields={'flags1.nope'}}) end)
-        expect.error_match('not a single value', function() df.readFields(job.items, {where={{'_value', '==', 1}}}) end)
-        expect.error_match('no readable attribute', function() df.readFields(items, {fields={'item_type.nope'}}) end)
-        expect.error_match('has no attributes', function() df.readFields(items, {fields={'quantity.nope'}}) end)
-        expect.error_match('must be a string or', function() df.readFields(items, {fields={5}}) end)
-        expect.error_match('fields must be a table', function() df.readFields(items, {fields='quantity'}) end)
-        expect.error_match('where must be a table', function() df.readFields(items, {where='quantity'}) end)
-        expect.error_match('list of conditions', function() df.readFields(items, {where={quantity=3}}) end)
-        expect.error_match('must be a table', function() df.readFields(items, {where={'quantity'}}) end)
-        expect.error_match('unknown comparison', function() df.readFields(items, {where={{'quantity', '=', 1}}}) end)
-        expect.error_match('no comparison', function() df.readFields(items, {where={{'quantity'}}}) end)
-        expect.error_match('no usable value', function() df.readFields(items, {where={{'quantity', '<', true}}}) end)
-        expect.error_match('no usable value', function() df.readFields(items, {where={{'quantity', '=='}}}) end)
-        expect.error_match('needs a list', function() df.readFields(items, {where={{'quantity', 'in', 3}}}) end)
+        expect.error_match('Usage', function() df.read_fields() end)
+        expect.error_match('expected a container', function() df.read_fields(5) end)
+        expect.error_match('not a container', function() df.read_fields(job) end)
+        expect.error_match('options must be a table', function() df.read_fields(items, 5) end)
+        expect.error_match('out must be a table', function() df.read_fields(items, {}, 5) end)
+        expect.error_match("no field 'nope'", function() df.read_fields(items, {fields={'nope'}}) end)
+        expect.error_match("no flag 'nope'", function() df.read_fields(items, {fields={'flags1.nope'}}) end)
+        expect.error_match('not a single value', function() df.read_fields(job.items, {where={{'_value', '==', 1}}}) end)
+        expect.error_match('no readable attribute', function() df.read_fields(items, {fields={'item_type.nope'}}) end)
+        expect.error_match('has no attributes', function() df.read_fields(items, {fields={'quantity.nope'}}) end)
+        expect.error_match('must be a string or', function() df.read_fields(items, {fields={5}}) end)
+        expect.error_match('fields must be a table', function() df.read_fields(items, {fields='quantity'}) end)
+        expect.error_match('where must be a table', function() df.read_fields(items, {where='quantity'}) end)
+        expect.error_match('list of conditions', function() df.read_fields(items, {where={quantity=3}}) end)
+        expect.error_match('must be a table', function() df.read_fields(items, {where={'quantity'}}) end)
+        expect.error_match('unknown comparison', function() df.read_fields(items, {where={{'quantity', '=', 1}}}) end)
+        expect.error_match('no comparison', function() df.read_fields(items, {where={{'quantity'}}}) end)
+        expect.error_match('no usable value', function() df.read_fields(items, {where={{'quantity', '<', true}}}) end)
+        expect.error_match('no usable value', function() df.read_fields(items, {where={{'quantity', '=='}}}) end)
+        expect.error_match('needs a list', function() df.read_fields(items, {where={{'quantity', 'in', 3}}}) end)
         expect.error_match('exactly one', function()
-            df.readFields(items, {where={{'not', {'quantity', '==', 1}, {'quantity', '==', 2}}}})
+            df.read_fields(items, {where={{'not', {'quantity', '==', 1}, {'quantity', '==', 2}}}})
         end)
-        expect.error_match('test must be a function', function() df.readFields(items, {test=5}) end)
-        expect.error_match('name of a container', function() df.readFields({a=items}, {fields={'quantity'}}) end)
-        expect.error_match('string names', function() df.readFields({a=items, [2]=items}) end)
-        expect.error_match('cannot be used as a container name', function() df.readFields({_from=items}) end)
+        expect.error_match('test must be a function', function() df.read_fields(items, {test=5}) end)
+        expect.error_match('name of a container', function() df.read_fields({a=items}, {fields={'quantity'}}) end)
+        expect.error_match('string names', function() df.read_fields({a=items, [2]=items}) end)
+        expect.error_match('cannot be used as a container name', function() df.read_fields({_from=items}) end)
     end)
 end
 
 function test.null_pointers()
     with_job(function(job)
-        local out, n = df.readFields(job.items, {fields={'_index'}, where={{'item', '==', df.NULL}}})
+        local out, n = df.read_fields(job.items, {fields={'_index'}, where={{'item', '==', df.NULL}}})
         expect.eq(n, 2)
-        out, n = df.readFields(job.items, {where={{'item', '~=', df.NULL}}})
+        out, n = df.read_fields(job.items, {where={{'item', '~=', df.NULL}}})
         expect.eq(n, 0)
 
         local item = df.item_boulderst:new()
@@ -456,30 +456,30 @@ function test.null_pointers()
             end,
             function()
                 job.items[1].item = item
-                out, n = df.readFields(job.items, {fields={'_index'}, where={{'item', '==', df.NULL}}})
+                out, n = df.read_fields(job.items, {fields={'_index'}, where={{'item', '==', df.NULL}}})
                 expect.eq(n, 1)
                 expect.eq(out._index[1], 0)
-                out, n = df.readFields(job.items, {fields={'_index'}, where={{'item', '~=', df.NULL}}})
+                out, n = df.read_fields(job.items, {fields={'_index'}, where={{'item', '~=', df.NULL}}})
                 expect.eq(n, 1)
                 expect.eq(out._index[1], 1)
-                out, n = df.readFields(job.items, {fields={'_index'}, where={{'not', {'item', '==', df.NULL}}}})
+                out, n = df.read_fields(job.items, {fields={'_index'}, where={{'not', {'item', '==', df.NULL}}}})
                 expect.eq(n, 1)
                 expect.eq(out._index[1], 1)
-                out, n = df.readFields(job.items, {where={{'or', {'item', '==', df.NULL}, {'job_item_idx', '==', 2}}}})
+                out, n = df.read_fields(job.items, {where={{'or', {'item', '==', df.NULL}, {'job_item_idx', '==', 2}}}})
                 expect.eq(n, 2)
             end)
 
         expect.error_match('only be compared with df.NULL', function()
-            df.readFields(job.items, {where={{'item', '==', 5}}})
+            df.read_fields(job.items, {where={{'item', '==', 5}}})
         end)
         expect.error_match('only be compared with df.NULL', function()
-            df.readFields(job.items, {where={{'item', '<', df.NULL}}})
+            df.read_fields(job.items, {where={{'item', '<', df.NULL}}})
         end)
         expect.error_match('only be compared with df.NULL', function()
-            df.readFields(job.items, {where={{'item', 'in', {df.NULL}}}})
+            df.read_fields(job.items, {where={{'item', 'in', {df.NULL}}}})
         end)
         -- a pointer is still not something to hand back
-        expect.error_match('not a single value', function() df.readFields(job.items, {where={{'_value', '==', 1}}}) end)
+        expect.error_match('not a single value', function() df.read_fields(job.items, {where={{'_value', '==', 1}}}) end)
     end)
 end
 
@@ -505,7 +505,7 @@ function test.null_test_behind_a_null_pointer()
             postings[1].job = job
             postings[2].job = job
             local function matching(cond)
-                local out, n = df.readFields(postings, {fields={'_index'}, where={cond}})
+                local out, n = df.read_fields(postings, {fields={'_index'}, where={cond}})
                 return column(out, '_index', n)
             end
             -- entry 0 has no job, so nothing can be said about its job's pointer
@@ -527,7 +527,7 @@ function test.comparisons_on_text()
         local texts = {'pear', '', 'apple', 'pear', 'Apple'}
         for i, text in ipairs(texts) do items[i - 1].reaction_class = text end
         local function matching(cond)
-            local out, n = df.readFields(items, {fields={'_index'}, where={cond}})
+            local out, n = df.read_fields(items, {fields={'_index'}, where={cond}})
             return column(out, '_index', n)
         end
         expect.table_eq(matching{'reaction_class', '==', 'pear'}, {0, 3})
@@ -569,7 +569,7 @@ function test.comparisons_on_decimals_and_booleans()
     dfhack.with_finalize(function() mat:delete() end, function()
         mat.mat_rgb[0], mat.mat_rgb[1], mat.mat_rgb[2] = 0.5, 2, -1.25
         local function matching(cond)
-            local out, n = df.readFields(mat.mat_rgb, {fields={'_index'}, where={cond}})
+            local out, n = df.read_fields(mat.mat_rgb, {fields={'_index'}, where={cond}})
             return column(out, '_index', n)
         end
         expect.table_eq(matching{'_value', '==', 0.5}, {0})
@@ -599,7 +599,7 @@ function test.comparisons_on_decimals_and_booleans()
         pile.quality_core[2] = true
         pile.quality_core[5] = true
         local function matching(cond)
-            local out, n = df.readFields(pile.quality_core, {fields={'_index'}, where={cond}})
+            local out, n = df.read_fields(pile.quality_core, {fields={'_index'}, where={cond}})
             return column(out, '_index', n)
         end
         expect.table_eq(matching{'_value', '==', true}, {2, 5})
@@ -622,7 +622,7 @@ function test.conditions_on_grids()
         end
         local source = {des=block.designation, t=block.temperature_1}
         local function check(where, want)
-            local out, n = df.readFields(source, {fields={'_index'}, where=where})
+            local out, n = df.read_fields(source, {fields={'_index'}, where=where})
             local expected = {}
             for index = 0, 255 do
                 local x, y = index // 16, index % 16
@@ -673,7 +673,7 @@ function test.conditions_on_grids()
             for y = 0, 15 do block.tiletype[x][y] = types[(x * 16 + y) % #types + 1] end
         end
         local function check_types(cond, want)
-            local out, n = df.readFields({tt=block.tiletype}, {fields={'_index'}, where={cond}})
+            local out, n = df.read_fields({tt=block.tiletype}, {fields={'_index'}, where={cond}})
             local expected = {}
             for index = 0, 255 do
                 if want(df.tiletype.attrs[block.tiletype[index // 16][index % 16]]) then
@@ -704,49 +704,49 @@ function test.lists_of_containers()
             b:erase(4)
             b[0].quantity = 100
 
-            local out, n = df.readFields({a, b}, {fields={'_from', '_index', 'quantity'}})
+            local out, n = df.read_fields({a, b}, {fields={'_from', '_index', 'quantity'}})
             expect.eq(n, 9)
             expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1, 2, 2, 2, 2})
             expect.table_eq(column(out, '_index', n), {0, 1, 2, 3, 4, 0, 1, 2, 3})
             expect.table_eq(column(out, 'quantity', n), {3, 1, 7, 5, 2, 100, 1, 7, 5})
 
-            out, n = df.readFields({b, a, b}, {fields={'_from', '_index'}, where={{'quantity', '>=', 5}}})
+            out, n = df.read_fields({b, a, b}, {fields={'_from', '_index'}, where={{'quantity', '>=', 5}}})
             expect.table_eq(column(out, '_from', n), {1, 1, 1, 2, 2, 3, 3, 3})
             expect.table_eq(column(out, '_index', n), {0, 2, 3, 2, 3, 0, 2, 3})
 
             -- one container reads as a list of one
-            out, n = df.readFields(a, {fields={'_from'}})
+            out, n = df.read_fields(a, {fields={'_from'}})
             expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1})
-            out, n = df.readFields({a})
+            out, n = df.read_fields({a})
             expect.eq(n, 5)
 
             -- nothing to read from
-            out, n = df.readFields({}, {fields={'quantity'}})
+            out, n = df.read_fields({}, {fields={'quantity'}})
             expect.eq(n, 0)
 
             local seen = {}
-            out, n = df.readFields({a, b}, {fields={'_from'}, test=function(index)
+            out, n = df.read_fields({a, b}, {fields={'_from'}, test=function(index)
                 seen[#seen + 1] = index
                 return index == 3
             end})
             expect.table_eq(seen, {0, 1, 2, 3, 4, 0, 1, 2, 3})
             expect.table_eq(column(out, '_from', n), {1, 2})
 
-            expect.error_match('not of the kind', function() df.readFields({a, job.items}) end)
-            expect.error_match('expected a container', function() df.readFields({a, 5}) end)
-            expect.error_match('expected a container', function() df.readFields({a, {x=b}}) end)
+            expect.error_match('not of the kind', function() df.read_fields({a, job.items}) end)
+            expect.error_match('expected a container', function() df.read_fields({a, 5}) end)
+            expect.error_match('expected a container', function() df.read_fields({a, {x=b}}) end)
             -- '_from' in a condition
-            out, n = df.readFields({a, b}, {fields={'_from', '_index'}, where={{'_from', '==', 2}, {'quantity', '>', 4}}})
+            out, n = df.read_fields({a, b}, {fields={'_from', '_index'}, where={{'_from', '==', 2}, {'quantity', '>', 4}}})
             expect.table_eq(column(out, '_from', n), {2, 2, 2})
             expect.table_eq(column(out, '_index', n), {0, 2, 3})
-            out, n = df.readFields({a, b}, {fields={'_index'},
+            out, n = df.read_fields({a, b}, {fields={'_index'},
                 where={{'or', {'and', {'_from', '==', 1}, {'_index', '==', 4}},
                               {'and', {'_from', 'in', {2}}, {'_index', '<', 1}}}}})
             expect.table_eq(column(out, '_index', n), {4, 0})
-            out, n = df.readFields(a, {where={{'_from', '==', 1}}})
+            out, n = df.read_fields(a, {where={{'_from', '==', 1}}})
             expect.eq(n, 5)
             expect.error_match("'_from' cannot be used in the conditions of any or all", function()
-                df.readFields({job}, {where={{'job_items.elements', 'any', {{'_from', '==', 1}}}}})
+                df.read_fields({job}, {where={{'job_items.elements', 'any', {{'_from', '==', 1}}}}})
             end)
         end)
     end)
@@ -757,7 +757,7 @@ function test.lists_of_containers()
             other.designation[2][0].flow_size = 4
             block.temperature_1[0][5] = 0
             other.temperature_1[2][0] = 9
-            local out, n = df.readFields(
+            local out, n = df.read_fields(
                 {{des=block.designation, t=block.temperature_1}, {des=other.designation, t=other.temperature_1}},
                 {fields={'_from', '_index', 'des.flow_size', 't'}, where={{'des.flow_size', '>', 0}}})
             expect.eq(n, 2)
@@ -766,14 +766,14 @@ function test.lists_of_containers()
             expect.table_eq(column(out, 'des.flow_size', n), {7, 4})
             expect.table_eq(column(out, 't', n), {0, 9})
             expect.error_match("no container named", function()
-                df.readFields({{des=block.designation, t=block.temperature_1}, {des=other.designation}})
+                df.read_fields({{des=block.designation, t=block.temperature_1}, {des=other.designation}})
             end)
             -- the first table says which names are read; others in later tables are left alone
-            out, n = df.readFields({{des=block.designation}, {des=other.designation, t=other.temperature_1}},
+            out, n = df.read_fields({{des=block.designation}, {des=other.designation, t=other.temperature_1}},
                                    {fields={'_from'}, where={{'des.flow_size', '>', 0}}})
             expect.table_eq(column(out, '_from', n), {1, 2})
             expect.error_match('table of named containers', function()
-                df.readFields({{des=block.designation}, other.designation})
+                df.read_fields({{des=block.designation}, other.designation})
             end)
         end)
     end)
@@ -786,7 +786,7 @@ function test.prepared_reads()
             b[2].quantity = 50
             local where = {{'quantity', '>', 4}}
             local options = {fields={'_from', '_index', 'quantity'}, where=where}
-            local read = df.prepareReadFields(a, options)
+            local read = df.prepare_read_fields(a, options)
             expect.eq(type(read), 'function')
 
             local out, n = read(a)
@@ -809,7 +809,7 @@ function test.prepared_reads()
             expect.eq(n, 0)
 
             -- the same answers as an unprepared read
-            local plain, count = df.readFields({b, a}, {fields={'_from', '_index', 'quantity'}, where={{'quantity', '>', 4}}})
+            local plain, count = df.read_fields({b, a}, {fields={'_from', '_index', 'quantity'}, where={{'quantity', '>', 4}}})
             out, n = read({b, a})
             expect.eq(n, count)
             for _, name in ipairs{'_from', '_index', 'quantity'} do
@@ -817,12 +817,12 @@ function test.prepared_reads()
             end
 
             -- a list can stand in for the container when preparing
-            local from_list = df.prepareReadFields({a, b}, {fields={'quantity'}})
+            local from_list = df.prepare_read_fields({a, b}, {fields={'quantity'}})
             out, n = from_list(b)
             expect.eq(n, 5)
 
             local calls = 0
-            local tested = df.prepareReadFields(a, {fields={'_index'}, test=function(index)
+            local tested = df.prepare_read_fields(a, {fields={'_index'}, test=function(index)
                 calls = calls + 1
                 return index % 2 == 0
             end})
@@ -836,7 +836,7 @@ function test.prepared_reads()
             b:erase(4)
             local nested = 0
             local outer
-            outer = df.prepareReadFields(a, {fields={'_from', '_index', 'quantity'}, where={{'quantity', '>', 2}},
+            outer = df.prepare_read_fields(a, {fields={'_from', '_index', 'quantity'}, where={{'quantity', '>', 2}},
                 test=function(index)
                     if nested < 3 then
                         nested = nested + 1
@@ -857,10 +857,10 @@ function test.prepared_reads()
             expect.error_match('expected a container', function() read(5) end)
             expect.error_match('out must be a table', function() read(a, 5) end)
             expect.error_match('Usage', function() read() end)
-            expect.error_match('Usage', function() df.prepareReadFields() end)
-            expect.error_match('no containers', function() df.prepareReadFields({}) end)
-            expect.error_match("no field 'nope'", function() df.prepareReadFields(a, {fields={'nope'}}) end)
-            expect.error_match('options must be a table', function() df.prepareReadFields(a, 5) end)
+            expect.error_match('Usage', function() df.prepare_read_fields() end)
+            expect.error_match('no containers', function() df.prepare_read_fields({}) end)
+            expect.error_match("no field 'nope'", function() df.prepare_read_fields(a, {fields={'nope'}}) end)
+            expect.error_match('options must be a table', function() df.prepare_read_fields(a, 5) end)
         end)
     end)
 
@@ -868,7 +868,7 @@ function test.prepared_reads()
         with_block(function(other)
             block.designation[0][5].flow_size = 7
             other.designation[2][0].flow_size = 4
-            local read = df.prepareReadFields({des=block.designation, tt=block.tiletype},
+            local read = df.prepare_read_fields({des=block.designation, tt=block.tiletype},
                 {fields={'_from', '_index', 'des.flow_size'}, where={{'des.flow_size', '>', 0}}})
             local out, n = read({des=other.designation, tt=other.tiletype})
             expect.table_eq(column(out, '_index', n), {32})
@@ -901,7 +901,7 @@ function test.range_on_a_vector()
     with_job(function(job)
         local items = job.job_items.elements
         local function read(range, where)
-            local out, n = df.readFields({items=items, _range=range},
+            local out, n = df.read_fields({items=items, _range=range},
                 {fields={'_index', 'items.quantity'}, where=where})
             return column(out, '_index', n), column(out, 'items.quantity', n)
         end
@@ -936,18 +936,18 @@ function test.range_on_a_vector()
 
         -- the test function is only called for entries in the range
         local seen = {}
-        df.readFields({items=items, _range={2, 3}}, {test=function(index)
+        df.read_fields({items=items, _range={2, 3}}, {test=function(index)
             seen[#seen + 1] = index
             return true
         end})
         expect.table_eq(seen, {2, 3})
 
         -- a range that runs past the end
-        local out, n = df.readFields({items=items, _range={4, 9}}, {fields={'_index'}}, {})
+        local out, n = df.read_fields({items=items, _range={4, 9}}, {fields={'_index'}}, {})
         expect.table_eq(column(out, '_index', n), {4})
 
         -- the range is only a part of the reading: the name '_range' is not a container
-        out, n = df.readFields({items=items, _range={0, 1}})
+        out, n = df.read_fields({items=items, _range={0, 1}})
         expect.eq(n, 2)
     end)
 end
@@ -955,7 +955,7 @@ end
 function test.range_on_a_grid()
     with_block(function(block)
         local function read(range, where)
-            local out, n = df.readFields({des=block.designation, _range=range},
+            local out, n = df.read_fields({des=block.designation, _range=range},
                 {fields={'_index'}, where=where})
             return column(out, '_index', n)
         end
@@ -995,33 +995,33 @@ function test.range_on_a_grid()
         block.designation[6][3].flow_size = 7
         block.designation[3][4].flow_size = 5
         local grids = {tt=block.tiletype, des=block.designation, _range={2, 4, 3, 5}}
-        local out, n = df.readFields(grids, {fields={'_index', 'des.flow_size'},
+        local out, n = df.read_fields(grids, {fields={'_index', 'des.flow_size'},
             where={{'des.flow_size', '>', 0}}})
         expect.table_eq(column(out, '_index', n), {2 * 16 + 3, 3 * 16 + 4})
         expect.table_eq(column(out, 'des.flow_size', n), {7, 5})
 
-        out, n = df.readFields(grids, {fields={'_index'}, where={{'tt.shape', '==', df.tiletype_shape.FLOOR}}})
+        out, n = df.read_fields(grids, {fields={'_index'}, where={{'tt.shape', '==', df.tiletype_shape.FLOOR}}})
         expect.table_eq(column(out, '_index', n), {2 * 16 + 3, 3 * 16 + 4})
 
         -- the index conditions work on the full-grid index
-        out, n = df.readFields(grids, {fields={'_index'}, where={{'_index', '>=', 3 * 16}}})
+        out, n = df.read_fields(grids, {fields={'_index'}, where={{'_index', '>=', 3 * 16}}})
         expect.table_eq(column(out, '_index', n), rectangle(3, 4, 3, 5))
 
         -- only the range is looked at, and in the order of the index
         local seen = {}
-        df.readFields(grids, {test=function(index)
+        df.read_fields(grids, {test=function(index)
             seen[#seen + 1] = index
             return false
         end})
         expect.table_eq(seen, rectangle(2, 4, 3, 5))
 
         -- without a range, nothing changes
-        out, n = df.readFields({tt=block.tiletype, des=block.designation}, {fields={'_index'},
+        out, n = df.read_fields({tt=block.tiletype, des=block.designation}, {fields={'_index'},
             where={{'des.flow_size', '>', 0}}})
         expect.table_eq(column(out, '_index', n), {2 * 16 + 3, 2 * 16 + 9, 3 * 16 + 4, 6 * 16 + 3})
 
         -- a grid with the range given on its own
-        out, n = df.readFields(block.designation, {fields={'_index'}, where={{'flow_size', '>', 0}}}, nil,
+        out, n = df.read_fields(block.designation, {fields={'_index'}, where={{'flow_size', '>', 0}}}, nil,
             {{2, 3, 4, 15}})
         expect.table_eq(column(out, '_index', n), {2 * 16 + 9, 3 * 16 + 4})
     end)
@@ -1031,7 +1031,7 @@ function test.range_in_lists()
     with_block(function(a)
         with_block(function(b)
             local function read(items)
-                local out, n = df.readFields(items, {fields={'_from', '_index'}})
+                local out, n = df.read_fields(items, {fields={'_from', '_index'}})
                 return column(out, '_from', n), column(out, '_index', n)
             end
 
@@ -1078,7 +1078,7 @@ function test.range_with_prepared_reads()
             a.designation[8][8].flow_size = 4
             b.designation[1][3].flow_size = 5
 
-            local read = df.prepareReadFields({des=a.designation},
+            local read = df.prepare_read_fields({des=a.designation},
                 {fields={'_from', '_index'}, where={{'des.flow_size', '>', 0}}})
             local out, n = read({des=a.designation})
             expect.table_eq(column(out, '_index', n), {1 * 16 + 2, 8 * 16 + 8})
@@ -1113,7 +1113,7 @@ function test.range_errors()
         with_block(function(block)
             local items = job.job_items.elements
             local function range(value)
-                return function() df.readFields({items=items, _range=value}) end
+                return function() df.read_fields({items=items, _range=value}) end
             end
             expect.error_match('range must be a table', range(5))
             expect.error_match('range must be a table', range('0,1'))
@@ -1136,17 +1136,17 @@ function test.range_errors()
             expect.error_match('container of containers', range({0, 1, 0, 1}))
 
             -- there is no other way to give a range
-            expect.error_match('Usage', function() df.readFields(items, {}, nil, {{0, 1}}) end)
+            expect.error_match('Usage', function() df.read_fields(items, {}, nil, {{0, 1}}) end)
 
             -- a bad range anywhere in a list is an error, whatever comes before it
             expect.error_match('range must be a table', function()
-                df.readFields({{des=block.designation}, {des=block.designation, _range={1}}})
+                df.read_fields({{des=block.designation}, {des=block.designation, _range={1}}})
             end)
             expect.error_match('whole numbers', function()
-                df.readFields({{des=block.designation, _range={0, 1, 0, 1}}, {des=block.designation, _range={0.5, 1, 0, 1}}})
+                df.read_fields({{des=block.designation, _range={0, 1, 0, 1}}, {des=block.designation, _range={0.5, 1, 0, 1}}})
             end)
 
-            local read = df.prepareReadFields({items=items}, {fields={'_index'}})
+            local read = df.prepare_read_fields({items=items}, {fields={'_index'}})
             expect.error_match('range must be a table', function() read({items=items, _range={1}}) end)
             expect.error_match('Usage', function() read({items=items}, nil, {{0, 1}}) end)
 
@@ -1178,45 +1178,45 @@ end
 
 function test.lists_of_objects()
     with_materials(function(a, b)
-        local out, n = df.readFields({a, b}, {fields={'_index', '_from', 'id'}})
+        local out, n = df.read_fields({a, b}, {fields={'_index', '_from', 'id'}})
         expect.eq(n, 2)
         expect.table_eq(column(out, '_index', n), {1, 2})
         expect.table_eq(column(out, '_from', n), {1, 1})
         expect.table_eq(column(out, 'id', n), {'IRON', 'IRONWOOD'})
 
         -- '_from' is 1 for every object, in a condition as well, and can be set against a field
-        out, n = df.readFields({a, b}, {where={{'_from', '==', 1}}})
+        out, n = df.read_fields({a, b}, {where={{'_from', '==', 1}}})
         expect.eq(n, 2)
-        out, n = df.readFields({a, b}, {where={{'_from', '~=', 1}}})
+        out, n = df.read_fields({a, b}, {where={{'_from', '~=', 1}}})
         expect.eq(n, 0)
-        out, n = df.readFields({a, b}, {fields={'_index'}, where={{'_index', '>', {field='_from'}}}})
+        out, n = df.read_fields({a, b}, {fields={'_index'}, where={{'_index', '>', {field='_from'}}}})
         expect.table_eq(column(out, '_index', n), {2})
 
-        out, n = df.readFields({a, b, a}, {fields={'_index'}, where={{'id', '==', 'IRON'}}})
+        out, n = df.read_fields({a, b, a}, {fields={'_index'}, where={{'id', '==', 'IRON'}}})
         expect.table_eq(column(out, '_index', n), {1, 3})
 
         -- the test function is given the place in the list
         local seen = {}
-        out, n = df.readFields({a, b}, {test=function(i) seen[#seen + 1] = i return i == 2 end, fields={'id'}})
+        out, n = df.read_fields({a, b}, {test=function(i) seen[#seen + 1] = i return i == 2 end, fields={'id'}})
         expect.table_eq(seen, {1, 2})
         -- and, second, the place of the container in the list that was passed in
         local froms = {}
         with_job(function(job)
             local items = job.job_items.elements
-            df.readFields({items, items}, {test=function(i, from) froms[#froms + 1] = from end, limit=1},
+            df.read_fields({items, items}, {test=function(i, from) froms[#froms + 1] = from end, limit=1},
                           nil, {{0, 0}, {0, 1}})
         end)
         expect.table_eq(froms, {1, 2, 2})
         expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
 
-        out, n = df.readFields({})
+        out, n = df.read_fields({})
         expect.eq(n, 0)
 
-        expect.error_match('entry 2 of the list is not a material', function() df.readFields({a, 5}) end)
+        expect.error_match('entry 2 of the list is not a material', function() df.read_fields({a, 5}) end)
         expect.error_match('entry 2 of the list is not a material', function()
-            with_job(function(job) df.readFields({a, job}) end)
+            with_job(function(job) df.read_fields({a, job}) end)
         end)
-        expect.error_match('not a container', function() df.readFields(a) end)
+        expect.error_match('not a container', function() df.read_fields(a) end)
     end)
 end
 
@@ -1229,13 +1229,13 @@ function test.objects_of_derived_classes()
         function() worker:delete() holder:delete() end,
         function()
             -- objects of different classes are read as the class they all derive from
-            local out, n = df.readFields({worker, holder}, {fields={'unit_id', 'general_ref_building:building_id'}})
+            local out, n = df.read_fields({worker, holder}, {fields={'unit_id', 'general_ref_building:building_id'}})
             expect.eq(n, 2)
             expect.eq(out.unit_id[1], 7)
             expect.eq(out.unit_id[2], nil)
             expect.eq(out['general_ref_building:building_id'][2], 9)
 
-            local read = df.prepareReadFields(df.general_ref, {fields={'_index'}, where={{'unit_id', '==', 7}}})
+            local read = df.prepare_read_fields(df.general_ref, {fields={'_index'}, where={{'unit_id', '==', 7}}})
             out, n = read({holder, worker, holder})
             expect.table_eq(column(out, '_index', n), {2})
             out, n = read({})
@@ -1246,14 +1246,14 @@ function test.objects_of_derived_classes()
             expect.error_match('set up for a list of objects', function() read(worker) end)
 
             -- one set up from a list takes objects of the nearest class the objects of that list share
-            read = df.prepareReadFields({worker}, {fields={'unit_id'}})
+            read = df.prepare_read_fields({worker}, {fields={'unit_id'}})
             expect.error_match('entry 1 of the list is not a general_ref_unit_workerst', function() read({holder}) end)
-            read = df.prepareReadFields({worker, holder}, {fields={'unit_id'}})
+            read = df.prepare_read_fields({worker, holder}, {fields={'unit_id'}})
             out, n = read({holder, worker})
             expect.eq(n, 2)
 
             -- a read set up from a type takes only objects of that type
-            read = df.prepareReadFields(df.general_ref_unit_workerst, {fields={'unit_id'}})
+            read = df.prepare_read_fields(df.general_ref_unit_workerst, {fields={'unit_id'}})
             out, n = read({worker})
             expect.table_eq(column(out, 'unit_id', n), {7})
             expect.error_match('entry 1 of the list is not a general_ref_unit_workerst', function() read({holder}) end)
@@ -1279,15 +1279,15 @@ function test.linked_lists()
             for i = 1, 4 do links[i]:delete() jobs[i]:delete() end
         end,
         function()
-            local out, n = df.readFields(head, {fields={'_index', 'completion_timer'}})
+            local out, n = df.read_fields(head, {fields={'_index', 'completion_timer'}})
             expect.eq(n, 3)
             expect.table_eq(column(out, '_index', n), {0, 1, 2})
             expect.table_eq(column(out, 'completion_timer', n), {10, 20, 40})
 
-            out, n = df.readFields(head, {fields={'completion_timer'}, where={{'completion_timer', '>', 10}}, limit=1})
+            out, n = df.read_fields(head, {fields={'completion_timer'}, where={{'completion_timer', '>', 10}}, limit=1})
             expect.table_eq(column(out, 'completion_timer', n), {20})
 
-            local read = df.prepareReadFields(head, {fields={'completion_timer'}})
+            local read = df.prepare_read_fields(head, {fields={'completion_timer'}})
             out, n = read(links[2])
             expect.table_eq(column(out, 'completion_timer', n), {20, 40})
             expect.error_match('set up for a linked list', function() read(jobs[1]) end)
@@ -1296,7 +1296,7 @@ function test.linked_lists()
             -- an empty list
             links[1].item = nil
             head.next = nil
-            out, n = df.readFields(head, {fields={'completion_timer'}})
+            out, n = df.read_fields(head, {fields={'completion_timer'}})
             expect.eq(n, 0)
         end)
 end
@@ -1304,39 +1304,39 @@ end
 function test.limit()
     with_job(function(job, specs)
         local items = job.job_items.elements
-        local out, n = df.readFields(items, {fields={'_index'}, limit=2})
+        local out, n = df.read_fields(items, {fields={'_index'}, limit=2})
         expect.table_eq(column(out, '_index', n), {0, 1})
-        out, n = df.readFields(items, {fields={'_index'}, where={{'item_type', '==', df.item_type.BAR}}, limit=1})
+        out, n = df.read_fields(items, {fields={'_index'}, where={{'item_type', '==', df.item_type.BAR}}, limit=1})
         expect.table_eq(column(out, '_index', n), {0})
-        out, n = df.readFields(items, {fields={'_index'}, where={{'quantity', '>=', 5}}, limit=10})
+        out, n = df.read_fields(items, {fields={'_index'}, where={{'quantity', '>=', 5}}, limit=10})
         expect.table_eq(column(out, '_index', n), {2, 3})
 
         -- nothing after the last entry that is kept is looked at
         local seen = 0
-        out, n = df.readFields(items, {test=function() seen = seen + 1 return true end, limit=3})
+        out, n = df.read_fields(items, {test=function() seen = seen + 1 return true end, limit=3})
         expect.eq(n, 3)
         expect.eq(seen, 3)
 
         -- the limit is on the whole call, not on each container
-        out, n = df.readFields({items, items}, {fields={'_from', '_index'}, limit=7})
+        out, n = df.read_fields({items, items}, {fields={'_from', '_index'}, limit=7})
         expect.eq(n, 7)
         expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1, 2, 2})
-        out, n = df.readFields({items, items}, {fields={'_from'}, limit=5})
+        out, n = df.read_fields({items, items}, {fields={'_from'}, limit=5})
         expect.table_eq(column(out, '_from', n), {1, 1, 1, 1, 1})
-        out, n = df.readFields({items=items, _range={1, 4}}, {fields={'_index'}, limit=2})
+        out, n = df.read_fields({items=items, _range={1, 4}}, {fields={'_index'}, limit=2})
         expect.table_eq(column(out, '_index', n), {1, 2})
 
-        local read = df.prepareReadFields(items, {fields={'_index'}, limit=2})
+        local read = df.prepare_read_fields(items, {fields={'_index'}, limit=2})
         for _ = 1, 2 do
             out, n = read(items)
             expect.table_eq(column(out, '_index', n), {0, 1})
         end
 
         for _, bad in ipairs{0, -1, 1.5, '2', true} do
-            expect.error_match('limit must be a whole number', function() df.readFields(items, {limit=bad}) end)
+            expect.error_match('limit must be a whole number', function() df.read_fields(items, {limit=bad}) end)
         end
-        expect.error_match("unknown option 'feilds'", function() df.readFields(items, {feilds={'quantity'}}) end)
-        expect.error_match('unknown option', function() df.readFields(items, {[1]='quantity'}) end)
+        expect.error_match("unknown option 'feilds'", function() df.read_fields(items, {feilds={'quantity'}}) end)
+        expect.error_match('unknown option', function() df.read_fields(items, {[1]='quantity'}) end)
     end)
 end
 
@@ -1344,7 +1344,7 @@ function test.entries_of_arrays_and_vectors()
     with_materials(function(a, b)
         local list = {a, b}
         -- an entry of an array is named by its number or by the name the array is indexed with
-        local out, n = df.readFields(list, {fields={'state_name.Solid', 'state_name.1', 'state_color.Liquid',
+        local out, n = df.read_fields(list, {fields={'state_name.Solid', 'state_name.1', 'state_color.Liquid',
                                                    'strength.yield.IMPACT'}})
         expect.eq(n, 2)
         expect.table_eq(column(out, 'state_name.Solid', n), {'iron', 'ironwood'})
@@ -1352,37 +1352,37 @@ function test.entries_of_arrays_and_vectors()
         expect.table_eq(column(out, 'state_color.Liquid', n), {9, 6})
         expect.table_eq(column(out, 'strength.yield.IMPACT', n), {500, 20})
 
-        out, n = df.readFields(list, {fields={'id'}, where={{'state_color.Solid', '<', 5}}})
+        out, n = df.read_fields(list, {fields={'id'}, where={{'state_color.Solid', '<', 5}}})
         expect.table_eq(column(out, 'id', n), {'IRON'})
-        out, n = df.readFields(list, {fields={'id'}, where={{'state_name.Liquid', '==', 'n/a'}}})
+        out, n = df.read_fields(list, {fields={'id'}, where={{'state_name.Liquid', '==', 'n/a'}}})
         expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
 
         -- an entry that a vector does not have is nil, and no condition on it holds
-        out, n = df.readFields(list, {fields={'reaction_product.item_type.0', 'reaction_product.item_type.2',
+        out, n = df.read_fields(list, {fields={'reaction_product.item_type.0', 'reaction_product.item_type.2',
                                              'reaction_product.item_type._size'}})
         expect.table_eq(column(out, 'reaction_product.item_type.0', n), {df.item_type.BAR, df.item_type.WOOD})
         expect.eq(out['reaction_product.item_type.2'][1], df.item_type.ARMOR)
         expect.eq(out['reaction_product.item_type.2'][2], nil)
         expect.table_eq(column(out, 'reaction_product.item_type._size', n), {3, 1})
-        out, n = df.readFields(list, {fields={'id'}, where={{'reaction_product.item_type.2', '~=', df.item_type.BAR}}})
+        out, n = df.read_fields(list, {fields={'id'}, where={{'reaction_product.item_type.2', '~=', df.item_type.BAR}}})
         expect.table_eq(column(out, 'id', n), {'IRON'})
-        out, n = df.readFields(list, {fields={'id'}, where={{'reaction_product.item_type._size', '<', 2}}})
+        out, n = df.read_fields(list, {fields={'id'}, where={{'reaction_product.item_type._size', '<', 2}}})
         expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
-        out, n = df.readFields(list, {fields={'id'}, where={{'reaction_product.item_type._size', '==',
+        out, n = df.read_fields(list, {fields={'id'}, where={{'reaction_product.item_type._size', '==',
                                                             {field='state_color.Solid'}}}})
         expect.eq(n, 0)
 
-        expect.error_match('outside the array', function() df.readFields(list, {fields={'state_name.99'}}) end)
-        expect.error_match('outside the array', function() df.readFields(list, {fields={'state_name.None'}}) end)
+        expect.error_match('outside the array', function() df.read_fields(list, {fields={'state_name.99'}}) end)
+        expect.error_match('outside the array', function() df.read_fields(list, {fields={'state_name.None'}}) end)
         expect.error_match('must be the index of an entry', function()
-            df.readFields(list, {fields={'state_name.nope'}})
+            df.read_fields(list, {fields={'state_name.nope'}})
         end)
-        expect.error_match('not a single value', function() df.readFields(list, {where={{'state_name', '==', 'x'}}}) end)
+        expect.error_match('not a single value', function() df.read_fields(list, {where={{'state_name', '==', 'x'}}}) end)
     end)
 
     with_job(function(job, specs)
         -- through a vector of pointers, and on to what an entry points to
-        local out, n = df.readFields({job}, {fields={'job_items.elements.1.quantity', 'job_items.elements.9.quantity',
+        local out, n = df.read_fields({job}, {fields={'job_items.elements.1.quantity', 'job_items.elements.9.quantity',
                                                     'items.0.job_item_idx', 'items._size', 'items.0.item'}})
         expect.eq(n, 1)
         expect.eq(out['job_items.elements.1.quantity'][1], specs[2].quantity)
@@ -1395,32 +1395,32 @@ function test.entries_of_arrays_and_vectors()
     with_block(function(block)
         -- entries of a grid that is a field
         block.designation[3][5].flow_size = 6
-        local out, n = df.readFields({block}, {fields={'designation.3.5.flow_size', 'designation.3.4.flow_size'}})
+        local out, n = df.read_fields({block}, {fields={'designation.3.5.flow_size', 'designation.3.4.flow_size'}})
         expect.eq(out['designation.3.5.flow_size'][1], 6)
         expect.eq(out['designation.3.4.flow_size'][1], 0)
-        out, n = df.readFields({block}, {where={{'designation.3.5.flow_size', '==', 6}}})
+        out, n = df.read_fields({block}, {where={{'designation.3.5.flow_size', '==', 6}}})
         expect.eq(n, 1)
-        expect.error_match('outside the array', function() df.readFields({block}, {fields={'designation.16.0.flow_size'}}) end)
+        expect.error_match('outside the array', function() df.read_fields({block}, {fields={'designation.16.0.flow_size'}}) end)
     end)
 end
 
 function test.flag_arrays()
     with_materials(function(a, b)
         local list = {a, b}
-        local out, n = df.readFields(list, {fields={'flags.IS_METAL', 'flags.IS_STONE'}})
+        local out, n = df.read_fields(list, {fields={'flags.IS_METAL', 'flags.IS_STONE'}})
         expect.table_eq(column(out, 'flags.IS_METAL', n), {true, false})
         expect.table_eq(column(out, 'flags.IS_STONE', n), {false, true})
-        out, n = df.readFields(list, {fields={'id'}, where={{'flags.IS_METAL', '==', true}}})
+        out, n = df.read_fields(list, {fields={'id'}, where={{'flags.IS_METAL', '==', true}}})
         expect.table_eq(column(out, 'id', n), {'IRON'})
-        out, n = df.readFields(list, {fields={'id'}, where={{'flags.IS_METAL', '==', false}}})
+        out, n = df.read_fields(list, {fields={'id'}, where={{'flags.IS_METAL', '==', false}}})
         expect.table_eq(column(out, 'id', n), {'IRONWOOD'})
-        out, n = df.readFields(list, {fields={'id'}, where={{'or', {'flags.IS_METAL', '==', true},
+        out, n = df.read_fields(list, {fields={'id'}, where={{'or', {'flags.IS_METAL', '==', true},
                                                             {'flags.IS_STONE', '==', true}}}})
         expect.eq(n, 2)
         -- by number, as Lua reads them too
-        out, n = df.readFields(list, {fields={'flags.' .. df.material_flags.IS_METAL}})
+        out, n = df.read_fields(list, {fields={'flags.' .. df.material_flags.IS_METAL}})
         expect.table_eq(column(out, 'flags.' .. df.material_flags.IS_METAL, n), {true, false})
-        expect.error_match("no flag 'NOPE'", function() df.readFields(list, {fields={'flags.NOPE'}}) end)
+        expect.error_match("no flag 'NOPE'", function() df.read_fields(list, {fields={'flags.NOPE'}}) end)
     end)
 end
 
@@ -1428,7 +1428,7 @@ function test.same_as_lua()
     with_materials(function(a, b)
         with_job(function(job)
             -- anything that is not a single value comes back as reading it in Lua gives it
-            local out, n = df.readFields({a}, {fields={'_value', 'heat', 'state_name', 'flags', 'reaction_product.item_type'}})
+            local out, n = df.read_fields({a}, {fields={'_value', 'heat', 'state_name', 'flags', 'reaction_product.item_type'}})
             expect.eq(n, 1)
             expect.eq(out._value[1], a)
             expect.eq(out.heat[1], a.heat)
@@ -1439,18 +1439,18 @@ function test.same_as_lua()
             expect.eq(out['reaction_product.item_type'][1], a.reaction_product.item_type)
             expect.eq(#out['reaction_product.item_type'][1], 3)
 
-            out, n = df.readFields(job.job_items.elements, {fields={'_value'}, where={{'quantity', '==', 7}}})
+            out, n = df.read_fields(job.job_items.elements, {fields={'_value'}, where={{'quantity', '==', 7}}})
             expect.eq(n, 1)
             expect.eq(out._value[1], job.job_items.elements[2])
-            out, n = df.readFields({items=job.job_items.elements}, {fields={'items'}, limit=1})
+            out, n = df.read_fields({items=job.job_items.elements}, {fields={'items'}, limit=1})
             expect.eq(out.items[1], job.job_items.elements[0])
 
             -- a pointer gives the object it points to, or nil
-            out, n = df.readFields(job.items, {fields={'item'}})
+            out, n = df.read_fields(job.items, {fields={'item'}})
             expect.eq(n, 2)
             expect.eq(out.item[1], nil)
             expect.eq(out.item[2], nil)
-            out, n = df.readFields({job}, {fields={'job_items.elements.0', 'job_items.elements.7'}})
+            out, n = df.read_fields({job}, {fields={'job_items.elements.0', 'job_items.elements.7'}})
             expect.eq(out['job_items.elements.0'][1], job.job_items.elements[0])
             expect.eq(out['job_items.elements.7'][1], nil)
         end)
@@ -1471,13 +1471,13 @@ function test.types()
                 holder:delete()
             end,
             function()
-                local out, n = df.readFields(refs, {fields={'_type'}})
+                local out, n = df.read_fields(refs, {fields={'_type'}})
                 expect.eq(n, 2)
                 expect.eq(out._type[1], df.general_ref_unit_workerst)
                 expect.eq(out._type[2], df.general_ref_building_holderst)
 
                 local function matching(cond)
-                    local found, count = df.readFields(refs, {fields={'_index'}, where={cond}})
+                    local found, count = df.read_fields(refs, {fields={'_index'}, where={cond}})
                     return column(found, '_index', count)
                 end
                 expect.table_eq(matching{'_type', '==', df.general_ref_unit_workerst}, {0})
@@ -1501,10 +1501,10 @@ function test.methods_are_not_called()
     with_job(function(job)
         local refs = job.general_refs
         expect.error_match('is a method, which a path cannot call', function()
-            df.readFields(refs, {fields={'getType'}})
+            df.read_fields(refs, {fields={'getType'}})
         end)
         expect.error_match("no field 'getType%(%)'", function()
-            df.readFields(refs, {where={{'getType()', '==', 1}}})
+            df.read_fields(refs, {where={{'getType()', '==', 1}}})
         end)
     end)
 end
@@ -1532,7 +1532,7 @@ function test.ids_followed_to_their_objects()
             end,
             function()
                 -- '_target' goes from an id to the object that has it, as the type's find() does
-                local out, n = df.readFields(refs, {fields={'general_ref_entity:entity_id._target.id', 'general_ref_entity:entity_id._target.type',
+                local out, n = df.read_fields(refs, {fields={'general_ref_entity:entity_id._target.id', 'general_ref_entity:entity_id._target.type',
                                                            'general_ref_entity:entity_id._target'}})
                 expect.eq(n, 2)
                 expect.eq(out['general_ref_entity:entity_id._target.id'][1], entity.id)
@@ -1541,15 +1541,15 @@ function test.ids_followed_to_their_objects()
                 expect.eq(out['general_ref_entity:entity_id._target'][1], entity)
                 expect.eq(out['general_ref_entity:entity_id._target'][2], nil)
 
-                out, n = df.readFields(refs, {fields={'_index'}, where={{'general_ref_entity:entity_id._target.type', '==',
+                out, n = df.read_fields(refs, {fields={'_index'}, where={{'general_ref_entity:entity_id._target.type', '==',
                                                                         df.historical_entity_type.MerchantCompany}}})
                 expect.table_eq(column(out, '_index', n), {0})
-                out, n = df.readFields(refs, {fields={'_index'}, where={{'general_ref_entity:entity_id._target.type', '~=',
+                out, n = df.read_fields(refs, {fields={'_index'}, where={{'general_ref_entity:entity_id._target.type', '~=',
                                                                         df.historical_entity_type.MerchantCompany}}})
                 expect.eq(n, 0)
 
                 expect.error_match('not the id of', function()
-                    df.readFields(job.job_items.elements, {fields={'quantity._target'}})
+                    df.read_fields(job.job_items.elements, {fields={'quantity._target'}})
                 end)
             end)
     end)
@@ -1559,7 +1559,7 @@ function test.conditions_on_two_fields()
     with_job(function(job, specs)
         local items = job.job_items.elements
         local function matching(cond)
-            local out, n = df.readFields(items, {fields={'_index'}, where={cond}})
+            local out, n = df.read_fields(items, {fields={'_index'}, where={cond}})
             return column(out, '_index', n)
         end
         -- quantities are 3 1 7 5 2 and mat_index is 10 20 30 40 50
@@ -1586,7 +1586,7 @@ function test.sets_and_text()
     with_job(function(job, specs)
         local items = job.job_items.elements
         local function matching(cond)
-            local out, n = df.readFields(items, {fields={'_index'}, where={cond}})
+            local out, n = df.read_fields(items, {fields={'_index'}, where={cond}})
             return column(out, '_index', n)
         end
         -- a set as Lua code keeps one, with the values as keys
@@ -1624,7 +1624,7 @@ function test.any_and_all()
     with_materials(function(a, b)
         with_job(function(job, specs)
             local function matching(list, cond)
-                local out, n = df.readFields(list, {fields={'_index'}, where={cond}})
+                local out, n = df.read_fields(list, {fields={'_index'}, where={cond}})
                 return column(out, '_index', n)
             end
             -- over a vector of values, where '_value' is the entry
@@ -1674,7 +1674,7 @@ function test.any_and_all()
                 expect.table_eq(matching(jobs, {'items', 'any', {{'job_item_idx', '==', 2}}}), {1})
                 job.items:erase(#job.items - 1)
 
-                local read = df.prepareReadFields(df.job, {fields={'_index'},
+                local read = df.prepare_read_fields(df.job, {fields={'_index'},
                                                            where={{elements, 'any', {{'quantity', '==', 7}}}}})
                 for _ = 1, 2 do
                     local out, n = read(jobs)
@@ -1705,7 +1705,7 @@ function test.pointers_compared_with_objects()
             end,
             function()
                 local function matching(cond)
-                    local out, n = df.readFields({job, other}, {fields={'_index'}, where={cond}})
+                    local out, n = df.read_fields({job, other}, {fields={'_index'}, where={cond}})
                     return column(out, '_index', n)
                 end
                 expect.table_eq(matching{'list_link', '==', link}, {1})
@@ -1723,7 +1723,7 @@ function test.each()
         local items = job.job_items.elements
         -- the values of the fields arrive as arguments, entry by entry, and nothing is stored
         local got = {}
-        local out, n = df.readFields(items, {fields={'_index', 'quantity'}, where={{'quantity', '>', 2}},
+        local out, n = df.read_fields(items, {fields={'_index', 'quantity'}, where={{'quantity', '>', 2}},
             each=function(index, quantity) got[#got + 1] = index * 100 + quantity end})
         expect.eq(n, 3)
         expect.table_eq(got, {3, 207, 305})
@@ -1732,12 +1732,12 @@ function test.each()
 
         -- arrays of an earlier read are left alone
         local kept = {quantity={99, 98}}
-        df.readFields(items, {fields={'quantity'}, where={{'quantity', '==', 7}}, each=function() end}, kept)
+        df.read_fields(items, {fields={'quantity'}, where={{'quantity', '==', 7}}, each=function() end}, kept)
         expect.table_eq(kept.quantity, {99, 98})
 
         -- a name given twice is passed twice
         got = {}
-        df.readFields(items, {fields={'quantity', '_index', 'quantity'}, limit=1,
+        df.read_fields(items, {fields={'quantity', '_index', 'quantity'}, limit=1,
             each=function(...) got = {...} end})
         expect.table_eq(got, {3, 0, 3})
 
@@ -1745,7 +1745,7 @@ function test.each()
         local path = df.coord_path:new()
         dfhack.with_finalize(function() path:delete() end, function()
             for _, v in ipairs{5, 6, 7} do path.x:insert('#', v) end
-            local _, count = df.readFields(path.x, {fields={'_index'}, where={{'_value', '==', 6}},
+            local _, count = df.read_fields(path.x, {fields={'_index'}, where={{'_value', '==', 6}},
                 each=function(index) path.x:erase(index) return false end})
             expect.eq(count, 1)
             expect.eq(#path.x, 2)
@@ -1753,7 +1753,7 @@ function test.each()
 
         -- false ends the read, nil does not
         local seen = 0
-        out, n = df.readFields(items, {fields={'_index'}, each=function(index)
+        out, n = df.read_fields(items, {fields={'_index'}, each=function(index)
             seen = seen + 1
             if index == 1 then return false end
         end})
@@ -1762,23 +1762,23 @@ function test.each()
 
         -- after test, with limit, and without fields
         got = {}
-        out, n = df.readFields(items, {fields={'_index'},
+        out, n = df.read_fields(items, {fields={'_index'},
             test=function(index) return index % 2 == 0 end, limit=2,
             each=function(index) got[#got + 1] = index end})
         expect.table_eq(got, {0, 2})
         local calls = 0
-        out, n = df.readFields(items, {each=function(...) calls = calls + select('#', ...) + 1 end})
+        out, n = df.read_fields(items, {each=function(...) calls = calls + select('#', ...) + 1 end})
         expect.eq(calls, 5)
 
         -- over a list of containers, with the place in it
         got = {}
-        df.readFields({{items=items, _range={0, 0}}, {items=items, _range={1, 2}}}, {fields={'_from', '_index'},
+        df.read_fields({{items=items, _range={0, 0}}, {items=items, _range={1, 2}}}, {fields={'_from', '_index'},
             each=function(from, index) got[#got + 1] = from * 10 + index end})
         expect.table_eq(got, {10, 21, 22})
 
         -- prepared
         got = {}
-        local read = df.prepareReadFields(items, {fields={'quantity'}, where={{'quantity', '>=', 5}},
+        local read = df.prepare_read_fields(items, {fields={'quantity'}, where={{'quantity', '>=', 5}},
             each=function(quantity) got[#got + 1] = quantity end})
         read(items)
         read(items)
@@ -1786,16 +1786,16 @@ function test.each()
 
         -- the entries may be moved, but their number must stay
         expect.error_match('changed size', function()
-            df.readFields(job.items, {each=function() job.items:insert('#', {new=true}) end})
+            df.read_fields(job.items, {each=function() job.items:insert('#', {new=true}) end})
         end)
-        expect.error_match('each must be a function', function() df.readFields(items, {each=1}) end)
+        expect.error_match('each must be a function', function() df.read_fields(items, {each=1}) end)
     end)
 end
 
 function test.fields_under_other_names()
     with_job(function(job)
         local items = job.job_items.elements
-        local out, n = df.readFields(items, {fields={{path='quantity', as='q'}, '_index', {path='flags1.improvable', as='imp'}},
+        local out, n = df.read_fields(items, {fields={{path='quantity', as='q'}, '_index', {path='flags1.improvable', as='imp'}},
                                              where={{'quantity', '>', 2}}})
         expect.eq(n, 3)
         expect.table_eq(column(out, 'q', n), {3, 7, 5})
@@ -1804,28 +1804,28 @@ function test.fields_under_other_names()
         expect.nil_(out.quantity)
 
         -- the same field under two names, and the same name twice for the same field
-        out, n = df.readFields(items, {fields={'quantity', {path='quantity', as='again'}, {path='quantity', as='again'}}, limit=2})
+        out, n = df.read_fields(items, {fields={'quantity', {path='quantity', as='again'}, {path='quantity', as='again'}}, limit=2})
         expect.table_eq(column(out, 'quantity', n), {3, 1})
         expect.table_eq(column(out, 'again', n), {3, 1})
 
         -- prepared, and into a table that is reused
-        local read = df.prepareReadFields(items, {fields={{path='mat_index', as='mat'}}})
+        local read = df.prepare_read_fields(items, {fields={{path='mat_index', as='mat'}}})
         local reused = {}
         out, n = read(items, reused)
         expect.eq(out, reused)
         expect.table_eq(column(out, 'mat', n), {10, 20, 30, 40, 50})
 
         expect.error_match("two different fields would be stored as 'q'", function()
-            df.readFields(items, {fields={{path='quantity', as='q'}, {path='mat_index', as='q'}}})
+            df.read_fields(items, {fields={{path='quantity', as='q'}, {path='mat_index', as='q'}}})
         end)
         expect.error_match("two different fields would be stored as 'quantity'", function()
-            df.readFields(items, {fields={'quantity', {path='mat_index', as='quantity'}}})
+            df.read_fields(items, {fields={'quantity', {path='mat_index', as='quantity'}}})
         end)
-        expect.error_match("must be {path=", function() df.readFields(items, {fields={{path='quantity'}}}) end)
-        expect.error_match("must be {path=", function() df.readFields(items, {fields={{path='quantity', as='q', x=1}}}) end)
-        expect.error_match("must be {path=", function() df.readFields(items, {fields={{'quantity', 'q'}}}) end)
-        expect.error_match("empty name", function() df.readFields(items, {fields={{path='quantity', as=''}}}) end)
-        expect.error_match("must be a string or", function() df.readFields(items, {fields={5}}) end)
+        expect.error_match("must be {path=", function() df.read_fields(items, {fields={{path='quantity'}}}) end)
+        expect.error_match("must be {path=", function() df.read_fields(items, {fields={{path='quantity', as='q', x=1}}}) end)
+        expect.error_match("must be {path=", function() df.read_fields(items, {fields={{'quantity', 'q'}}}) end)
+        expect.error_match("empty name", function() df.read_fields(items, {fields={{path='quantity', as=''}}}) end)
+        expect.error_match("must be a string or", function() df.read_fields(items, {fields={5}}) end)
     end)
 end
 
@@ -1849,7 +1849,7 @@ function test.ids_in_vectors_followed_to_their_objects()
         function()
             local parties = {first, second}
             -- an entry of a vector of ids, picked by its index
-            local out, n = df.readFields(parties, {fields={'entity_ids.1._target.type', 'entity_ids.0._target',
+            local out, n = df.read_fields(parties, {fields={'entity_ids.1._target.type', 'entity_ids.0._target',
                                                            'entity_ids.1._target'}})
             expect.eq(n, 2)
             expect.eq(out['entity_ids.1._target.type'][1], df.historical_entity_type.MerchantCompany)
@@ -1859,7 +1859,7 @@ function test.ids_in_vectors_followed_to_their_objects()
 
             -- any and all of the entries
             local function matching(cond)
-                local o, count = df.readFields(parties, {fields={'_index'}, where={cond}})
+                local o, count = df.read_fields(parties, {fields={'_index'}, where={cond}})
                 return column(o, '_index', count)
             end
             local is_company = {'_value._target.type', '==', df.historical_entity_type.MerchantCompany}
@@ -1870,10 +1870,10 @@ function test.ids_in_vectors_followed_to_their_objects()
 
             -- a vector that does not say what its numbers are ids of
             expect.error_match('not the id of', function()
-                df.readFields(parties, {where={{'complaint', 'any', {{'year._target.id', '==', 1}}}}})
+                df.read_fields(parties, {where={{'complaint', 'any', {{'year._target.id', '==', 1}}}}})
             end)
             expect.error_match('not the id of', function()
-                df.readFields(first.entity_ids, {fields={'_value._target'}})
+                df.read_fields(first.entity_ids, {fields={'_value._target'}})
             end)
         end)
 end
