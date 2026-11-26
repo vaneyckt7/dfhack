@@ -457,6 +457,231 @@ The ``df`` table itself contains the following functions and values:
 
   Returns *nil* if NULL, or a ref.
 
+* ``df.read_fields(container[, options[, out]])``
+
+  Reads chosen fields from every entry of a container into flat Lua arrays in
+  one call. See :ref:`lua-api-read-fields`.
+
+* ``df.prepare_read_fields(container[, options])``
+
+  Sets up such a read once and returns a function that does it. See
+  :ref:`lua-api-read-fields`.
+
+.. _lua-api-read-fields:
+
+Reading many fields at once
+===========================
+
+``df.read_fields(container[, options[, out]])`` reads chosen fields from
+every entry of a container into flat Lua arrays in one call, which is much
+faster than indexing each entry from Lua. This function and
+``df.prepare_read_fields`` are experimental and their interface may change.
+
+``container`` is a container ref, for example a vector of structures, a
+vector of numbers, or a fixed-size array. Nested fixed-size arrays are read
+as one flat list, first index first, so a 16x16 array has 256 entries and
+entry ``[x][y]`` has the 0-based index ``x*16+y``. A flag array or a vector
+of booleans cannot be the container. A vector of pointers is
+read as the structures it points to, and null entries are skipped. As with a
+loop in Lua, the pointers in the container must be valid: a container that
+the game leaves holding stale pointers (the ``temp_save`` and ``order_load``
+vectors, for example) is not safe to read.
+
+It may instead be a table that maps names to containers with the same number
+of entries, which are then read side by side. Every field name then starts
+with the name of the container it refers to::
+
+  local out, n = df.read_fields(
+      {tt=block.tiletype, des=block.designation},
+      {fields={'_index', 'des.flow_size'},
+       where={{'tt.shape', '==', df.tiletype_shape.FLOOR},
+              {'des.hidden', '==', false}}})
+
+An entry is skipped when any of the named containers holds a null pointer
+at that position.
+
+It may also be a list of containers, or a list of such tables of named
+containers, to read many of them in one call: for example the same grids of
+every map block in view. They are read one after the other into the same
+arrays, and the field ``_from`` tells which one an entry came from. Every
+item of the list must be of the same kind as the first (the same type of
+container, and the names of the first; other names in later tables are
+ignored); they need not hold the same number of entries. An empty list
+reads nothing and leaves ``out`` as it is. For example::
+
+  local out, n = df.read_fields(
+      {block_a.flows, block_b.flows},
+      {fields={'_from', 'type', 'density'}, where={{'density', '>', 0}}})
+
+A read can be limited to a range of a container, so that the entries
+outside it are neither tested by ``where`` nor returned, and are not even
+visited. Since a list holds many containers, each of which may need its own
+range, the range is given for each item and not in ``options``: the key
+``_range`` of a table of named containers holds its range (``_range`` is
+not the name of a container).
+
+- For a container of numbers or of structures it is ``{first, last}``, the
+  0-based indexes of the first and the last entry wanted, both included.
+- For nested fixed-size arrays, such as a 16x16 array, it is
+  ``{first1, last1, first2, last2}``: the range of the first index, then of
+  the second. ``{first1, last1}`` alone keeps every entry of the items in
+  that range. With more than two levels the second pair counts through the
+  levels after the first as one flat list.
+- Entries keep the ``_index`` they have without a range, so ``x*16+y`` for
+  ``[x][y]``.
+- Numbers outside the container are clamped to it, and a range that holds
+  nothing, because ``first`` is after ``last`` or because it lies outside
+  the container, reads nothing.
+- A range that is not a table of 2 or 4 whole numbers (decimals such as
+  ``3.0`` are fine, ``0.5`` and ``math.huge`` are not) is an error.
+
+This reads a different rectangle from each of two map blocks::
+
+  local out, n = df.read_fields(
+      {{des=block_a.designation, tt=block_a.tiletype, _range={2, 4, 3, 5}},
+       {des=block_b.designation, tt=block_b.tiletype, _range={0, 15, 10, 15}}},
+      {fields={'_from', '_index', 'des.flow_size'},
+       where={{'tt.shape', '==', df.tiletype_shape.FLOOR}}})
+
+A container that is passed on its own, without a name, cannot have a range:
+give it a name, as in ``{des=block.designation, _range={2, 4, 3, 5}}``, and
+write the fields with that name (``des.flow_size``). When the containers of a
+table are read side by side, a range needs them to be arranged the same way
+(all 16x16, say).
+
+Objects that are not in one container can be read too. Pass a list of them,
+for example the units a script has already picked out. They must be
+structures of one type, or of classes that derive from one class (fields
+are looked up in the nearest class they all derive from), and
+``_index`` is then the place of the object in the list, from 1. A list of
+objects cannot have names or ranges; ``_range`` on a list, of objects or of
+containers, is an error. For example::
+
+  local out, n = df.read_fields(my_units,
+      {fields={'id', 'pos.x', 'pos.y'},
+       where={{'flags1.inactive', '==', false}}})
+
+``options`` is a table that can contain:
+
+``fields``
+  A list of field names to read. A name is a path of steps separated by
+  dots. In place of a name, ``{path='des.flow_size', as='flow'}`` reads
+  that path and stores it in ``out`` under the other name, here
+  ``out.flow``; two different paths cannot be stored under one name. A
+  step can be:
+
+  - a field of a structure (``pos.x``), or a pointer field, which is
+    followed (``item.id``)
+  - a flag of a bitfield (``flags.DEAD``) or of a flag array
+    (``flags.IS_METAL``); a bitfield named without a flag is read as its
+    whole numeric value, and a flag past the end of a flag array is *nil*
+  - an attribute of an enum value (``item_type.caption``)
+  - one entry of an array or a vector inside the entry, by its 0-based
+    number or, when the array is indexed by an enum, by the name of the key
+    (``state_name.Solid``, ``general_refs.0.unit_id``); the value is *nil*
+    when a vector has no such entry
+  - ``_size``, the number of entries of an array or a vector, but not of a
+    flag array (``inventory._size``)
+  - ``_type``, the type of an object, which for an object of a class is its
+    actual class, as ``object._type`` gives it
+
+  ``_index`` is the 0-based index of the entry in its container, ``_from``
+  is the 1-based place of that container in the list that was passed in (1
+  when it was not a list), and ``_value`` is the entry itself, and can
+  start a path (``_value.quantity`` is the same as ``quantity``). With
+  named containers ``_value`` is not used: the name alone (``tt``) is the
+  entry of that container.
+
+  A path that ends at a single value gives a number, a boolean or text. One
+  that ends at a structure, a container, an array or a flag array gives what
+  reading that field in Lua gives: a reference to it. That costs an
+  allocation for each entry, like any reference. A path that ends at a
+  pointer gives a reference to what it points to, or the value itself when
+  that is a number, a boolean or text. When a pointer on the path is null,
+  the value is *nil*.
+
+  When the entries are objects of a class that has derived classes, a field
+  that only a derived class has can be named too, and its value is *nil* for
+  entries of any other class. If several derived classes have a field of
+  that name, write the step as ``Class:field``, for example
+  ``general_ref_building:building_id``.
+
+  A name that a class shares with a field of one of its parents is the
+  parent's field, and the field of the class itself is ``Class.field``, as
+  in Lua.
+
+``where``
+  A list of conditions; only entries that pass all of them are returned.
+  A condition is ``{field, comparison, value}``, where ``field`` is a name as
+  described above and ``comparison`` is one of:
+
+  - ``==``, ``~=``, ``<``, ``<=``, ``>``, ``>=``
+  - ``in``, with a list of accepted values
+  - ``is_instance``, for a path that ends in ``_type``, with a type as the
+    value: whether the object is of that type or of a class derived from
+    it. ``==`` and ``~=`` on such a path ask for exactly that type.
+
+  Conditions can be combined with ``{'and', c1, c2, ...}``,
+  ``{'or', c1, c2, ...}`` and ``{'not', c}``, one inside another up to 32
+  deep. Without ``where``, or with an empty list, every entry passes.
+
+  Values are compared the way Lua compares them: whole and decimal numbers
+  by value, text with text, and values of different types are never equal
+  and never in order (a flag is a boolean, so compare it with ``true`` or
+  ``false``, not 1). The value given to ``<``, ``<=``, ``>`` or ``>=`` must
+  be a number or text, and no comparison takes *nil*; either is an error.
+  What is not there (anything past a null pointer, a field of a class that
+  the entry is not of, or an attribute that has no text for the entry's
+  value) passes no comparison, ``~=`` included, so only ``{'not', ...}``
+  around such a comparison passes.
+  Numbers, booleans and text can be compared; a field that holds anything
+  else cannot be used in a condition, and neither can a fixed-size ``char``
+  array, which can only be listed in ``fields``.
+
+  To ask whether a pointer field is null, compare the pointer itself with
+  ``df.NULL``, using ``==`` or ``~=``: ``{'item', '~=', df.NULL}``. A pointer
+  can be compared in the same way with an object, to ask whether it points
+  to that object. These are the only things a condition can do with a path
+  that ends at a pointer. ``_from`` can be compared like any number.
+
+``limit``
+  The largest number of entries to return, a whole number of at least 1.
+  The read stops as soon as it has that many, so ``limit=1`` finds the
+  first entry that passes. Nothing after the place where a read stops is
+  looked at, so the items of a list that come after it
+  are not checked and an error in one of them is not reported.
+
+Any other key in ``options`` is an error. The options are not looked at when
+an empty list is passed, since there is nothing to read.
+
+Returns ``out, n``. ``n`` is the number of entries returned, and ``out`` is a
+table with one array for each name in ``fields``, keyed by that name and
+indexed from 1 to ``n``. If ``out`` is passed in, it and the arrays it
+already holds are reused. What an earlier read left in an array past
+``n`` is cleared, up to the first *nil* (values can be *nil*, so go by
+``n`` and not by ``#``). Arrays for fields that this read was not asked
+for are left as they are. Without ``fields``, only the count is useful.
+
+``df.prepare_read_fields(container[, options])`` sets up a read once, for
+code that does the same read again and again. It takes what ``df.read_fields`` (above) takes, and returns a function
+``read(container[, out])`` that does that read on any container,
+table of named containers, or list of them, of the same kind as the one
+given here, and returns ``out, n`` in the same way. The ranges in ``_range``
+are not part of the setup and can be different on every call. The options
+are taken in when the read is set up; changing the options table afterwards
+has no effect on it. The container passed here only shows what kind of
+container will be read. For a read of a list of objects, pass a list with
+one object in it, or just the type (``df.unit``); the function then takes
+lists of objects of that type or of classes derived from it. An empty list
+is an error here, since it does not show what kind of container will be
+read. For example::
+
+  local read_flows = df.prepare_read_fields(block.flows,
+      {fields={'type', 'density'}, where={{'density', '>', 0}}})
+  local out, n
+  -- later, as often as needed; out is reused
+  out, n = read_flows(other_block.flows, out)
+
 .. _lua-api-table-assignment:
 
 Recursive table assignment
