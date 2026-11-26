@@ -64,6 +64,19 @@ function test.fields_of_structures()
         df.write_fields(items, {['flags1.whole']={0, 0, 0}})
         expect.false_(items[1].flags1.improvable)
         expect.false_(items[2].flags1.improvable)
+        -- a bitfield named without a flag is the bitfield as a whole too; only its own bytes are written
+        df.write_fields(items, {flags1={-1, 0, -1}})
+        expect.true_(items[0].flags1.improvable)
+        expect.false_(items[1].flags1.improvable)
+        expect.eq(items[0].quantity, 30)
+        expect.eq(items[0].mat_index, 10)
+        expect.eq(items[2].quantity, 70)
+        df.write_fields(items, {flags1={0, 0, 0}})
+        -- numbers that are whole are taken as an assignment takes them
+        df.write_fields(items, {_index={1}, quantity={4.0}, ['flags1.improvable']={1.0}})
+        expect.eq(items[1].quantity, 4)
+        expect.true_(items[1].flags1.improvable)
+        df.write_fields(items, {_index={1}, quantity={1}, ['flags1.improvable']={false}})
         -- a string
         df.write_fields(items, {_index={1}, reaction_class={'FLUX'}})
         expect.eq(items[1].reaction_class, 'FLUX')
@@ -149,11 +162,11 @@ function test.errors()
             df.write_fields(items, {nonsense={1, 2, 3}})
         end)
         -- things that are not a single value
-        for _, path in ipairs{'flags1', 'item_type.caption', 'contains', 'contains._size', '_from'} do
+        for _, path in ipairs{'item_type.caption', 'contains', 'contains._size', '_from'} do
             expect.error(function() df.write_fields(items, {_index={0}, [path]={1}}) end, path)
         end
         expect.error_match('not a value that can be written', function()
-            df.write_fields(items, {_index={0}, flags1={1}})
+            df.write_fields(items, {_index={0}, contains={1}})
         end)
         -- a value of the wrong type stops the write; the rows before it stay written
         expect.error_match('df.write_fields.quantity', function()
@@ -162,10 +175,10 @@ function test.errors()
         expect.eq(items[0].quantity, 100)
         expect.eq(items[1].quantity, 1)
         expect.eq(items[2].quantity, 7)
-        expect.error_match('must be a boolean or a whole number', function()
+        expect.error_match('must be a boolean or a number', function()
             df.write_fields(items, {_index={0}, ['flags1.improvable']={'yes'}})
         end)
-        expect.error_match('must be a whole number', function()
+        expect.error_match('must be a number', function()
             df.write_fields(items, {_index={0}, ['flags1.whole']={true}})
         end)
         -- an entry that is a null pointer
@@ -197,8 +210,28 @@ function test.flags_and_unreachable_places()
         expect.error_match("entry 0 has no 'reaction_product.item_type.1' to write to", function()
             df.write_fields(a, {['reaction_product.item_type.1']={df.item_type.WOOD}}, {count=1})
         end)
-        expect.error_match('must be a boolean', function()
-            df.write_fields(a, {['flags.IS_METAL']={1}}, {count=1})
+        df.write_fields(a, {['flags.IS_METAL']={1}}, {count=1})
+        expect.true_(a.flags.IS_METAL)
+        expect.error_match('must be a boolean or a number', function()
+            df.write_fields(a, {['flags.IS_METAL']={'yes'}}, {count=1})
         end)
     end)
+end
+
+function test.containers_that_cannot_be_written()
+    local block = df.map_block:new()
+    dfhack.with_finalize(function() block:delete() end, function()
+        -- a bit container is not a run of entries with fields
+        expect.error_match('not a container it can write to', function()
+            df.write_fields(block.designation[0][0], {_value={true}})
+        end)
+    end)
+    -- the list of an enum's attribute belongs to the type
+    local attrs = df.unit_action_type.attrs[df.unit_action_type.Move]
+    local list = attrs and attrs.group
+    if list and type(list) == 'userdata' and #list > 0 then
+        local before = list[0]
+        expect.error_match('read%-only', function() df.write_fields(list, {_index={0}, _value={before}}) end)
+        expect.eq(list[0], before)
+    end
 end

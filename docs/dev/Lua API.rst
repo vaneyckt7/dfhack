@@ -768,7 +768,10 @@ The ``df`` table itself contains the following functions and values:
   ``'pos.x'``, ``'_value'`` for the entries of a container of plain values.
   It must lead to a single value: a number, a boolean, a string, an enum
   value, one flag, or a bitfield as a whole. Values are checked as an
-  assignment in Lua checks them. Since the columns are those of a read, the
+  assignment in Lua checks them, and ``nil`` is not a value. Every column
+  must be one that can be written, so columns such as an enum attribute are
+  taken out of a read's result before it is handed back. When two columns
+  lead to the same place, which of them is written last is not defined. Since the columns are those of a read, the
   result of a read can be changed and handed back, and a ``where`` in the
   read decides which entries are written::
 

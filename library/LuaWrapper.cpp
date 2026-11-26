@@ -3635,6 +3635,10 @@ static int meta_write_fields(lua_State *state)
                 luaL_error(state, "df.write_fields: %s is not a container it can write to",
                            id->getFullName().c_str());
             read_describe_source(state, 1, src);
+            // containers that an assignment in Lua refuses to change
+            if (src.container->is_readonly() ||
+                (src.outer > 0 && src.container->lua_item_count(state, src.ptr, container_identity::COUNT_WRITE) <= 0))
+                luaL_error(state, "df.write_fields: %s is read-only", id->getFullName().c_str());
         }
         else
         {
@@ -3764,24 +3768,24 @@ static int meta_write_fields(lua_State *state)
             case ReadAccessor::BIT:
                 if (lua_isboolean(state, value_idx))
                     setBitfieldField(ptr, acc.bit, unsigned(acc.bit_size), lua_toboolean(state, value_idx));
-                else if (lua_isinteger(state, value_idx))
+                else if (lua_type(state, value_idx) == LUA_TNUMBER)
                     setBitfieldField(ptr, acc.bit, unsigned(acc.bit_size), int(lua_tointeger(state, value_idx)));
                 else
-                    luaL_error(state, "df.write_fields: '%s' %d must be a boolean or a whole number",
+                    luaL_error(state, "df.write_fields: '%s' %d must be a boolean or a number",
                                lua_tostring(state, column.name), int(row));
                 break;
             case ReadAccessor::WHOLE:
             {
-                if (!lua_isinteger(state, value_idx))
-                    luaL_error(state, "df.write_fields: '%s' %d must be a whole number",
+                if (lua_type(state, value_idx) != LUA_TNUMBER)
+                    luaL_error(state, "df.write_fields: '%s' %d must be a number",
                                lua_tostring(state, column.name), int(row));
                 size_t whole = size_t(lua_tointeger(state, value_idx));
                 memcpy(ptr, &whole, std::min(sizeof(whole), acc.whole_size));
                 break;
             }
             case ReadAccessor::FLAG:
-                if (!lua_isboolean(state, value_idx))
-                    luaL_error(state, "df.write_fields: '%s' %d must be a boolean",
+                if (!lua_isboolean(state, value_idx) && lua_type(state, value_idx) != LUA_TNUMBER)
+                    luaL_error(state, "df.write_fields: '%s' %d must be a boolean or a number",
                                lua_tostring(state, column.name), int(row));
                 {
                     int count = acc.flags->raw_read_count(ptr);
@@ -5014,11 +5018,12 @@ static int DoAttach(lua_State *state)
     lua_pushcclosure(state, meta_prepare_read_fields, 1);
     lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_PREPARE_READ_FIELDS_NAME);
 
-    // the table is where an error in writing a value looks for the name to report it under
+    // the second table is where an error in writing a value looks for the name to report it under
+    lua_rawgetp(state, LUA_REGISTRYINDEX, &DFHACK_TYPETABLE_TOKEN);
     lua_newtable(state);
     lua_pushliteral(state, "df.write_fields");
     lua_setfield(state, -2, "__metatable");
-    lua_pushcclosure(state, meta_write_fields, 1);
+    lua_pushcclosure(state, meta_write_fields, 2);
     lua_setfield(state, LUA_REGISTRYINDEX, DFHACK_WRITE_FIELDS_NAME);
 
     lua_rawgetp(state, LUA_REGISTRYINDEX, &DFHACK_TYPETABLE_TOKEN);
