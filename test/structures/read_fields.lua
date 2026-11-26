@@ -197,6 +197,41 @@ function test.comparisons_on_whole_numbers()
     end)
 end
 
+function test.comparisons_on_unsigned_and_attributes()
+    with_block(function(block)
+        -- unsigned values with the top bit set must not turn negative
+        block.temperature_1[0][1] = 65535
+        block.temperature_1[3][0] = 32768
+        block.temperature_1[15][15] = 32767
+        local function matches(source, where)
+            local out, n = df.readFields(source, {fields={'_index'}, where=where})
+            return column(out, '_index', n)
+        end
+        local temp = block.temperature_1
+        expect.table_eq(matches(temp, {{'_value', '==', 65535}}), {1})
+        expect.table_eq(matches(temp, {{'_value', '==', -1}}), {})
+        expect.table_eq(matches(temp, {{'_value', '>', 32767}}), {1, 48})
+        expect.table_eq(matches(temp, {{'_value', '>=', 32767}}), {1, 48, 255})
+        expect.table_eq(matches(temp, {{'_value', 'in', {32768, 65535, -1}}}), {1, 48})
+        expect.table_eq(matches(temp, {{'_value', '<', 0}}), {})
+
+        -- enum attributes, compared directly and through a second attribute step; a new block is all open space
+        block.tiletype[0][0] = df.tiletype.Void
+        block.tiletype[2][3] = df.tiletype.StoneFloor1
+        block.tiletype[4][0] = df.tiletype.StoneWall
+        local shape, basic = df.tiletype_shape, df.tiletype_shape_basic
+        local tt = block.tiletype
+        expect.table_eq(matches(tt, {{'shape', 'in', {shape.FLOOR, shape.WALL}}}), {35, 64})
+        expect.table_eq(matches(tt, {{'shape.basic_shape', 'in', {basic.Wall, basic.Floor}}}), {35, 64})
+        expect.table_eq(matches(tt, {{'shape.basic_shape', '~=', basic.Open}}), {0, 35, 64})
+        expect.table_eq(matches(tt, {{'shape', '>', shape.EMPTY}}), {35, 64})
+        -- a tile with no shape reads as -1, also on the way to the next attribute
+        expect.table_eq(matches(tt, {{'shape', '<', 0}}), {0})
+        expect.table_eq(matches(tt, {{'shape', '==', shape.NONE}, {'shape.basic_shape', '==', basic.None}}), {0})
+        expect.table_eq(matches(tt, {{'shape.basic_shape', 'in', {basic.None, basic.Wall}}}), {0, 64})
+    end)
+end
+
 function test.grids_read_together()
     with_block(function(block)
         block.tiletype[2][3] = df.tiletype.StoneFloor1
