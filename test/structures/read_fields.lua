@@ -3130,3 +3130,42 @@ function test.every_field_of_every_type_is_taken_or_refused()
         expect.fail(('%s: %s'):format(where, reason))
     end
 end
+
+function test.aaa_bit_vector_plain_lua()
+    local info = df.burrow_infost:new()
+    dfhack.with_finalize(
+        function() info:delete() end,
+        function()
+            local v = info.sel_units
+            v:insert('#', true)
+            v:insert('#', false)
+            v:insert('#', true)
+            expect.eq(#v, 3)
+            expect.true_(v[0])
+            expect.false_(v[1])
+            expect.true_(v[2])
+        end)
+end
+
+function test.aab_bit_vector_read_fields()
+    local info = df.burrow_infost:new()
+    dfhack.with_finalize(
+        function() info:delete() end,
+        function()
+            local v = info.sel_units
+            v:resize(3)
+            v[0] = true
+            v[2] = true
+            local out = df.read_fields({info}, {fields={'sel_units.0', 'sel_units.1', 'sel_units.2', 'sel_units.3',
+                                                        'sel_units.70'}})
+            expect.eq(out['sel_units.0'][1], true)
+            expect.eq(out['sel_units.1'][1], false)
+            expect.eq(out['sel_units.2'][1], true)
+            expect.eq(out['sel_units.3'][1], nil)
+            expect.eq(out['sel_units.70'][1], nil)
+            expect.error_match("no flag", function() df.read_fields({info}, {fields={'sel_units.-1'}}) end)
+            expect.eq(select(2, df.read_fields({info}, {where={{'sel_units.2', '==', true}}})), 1)
+            expect.eq(select(2, df.read_fields({info}, {where={{'sel_units.1', '==', true}}})), 0)
+            expect.error_match('not a container it can read', function() df.read_fields(v, {fields={'_index'}}) end)
+        end)
+end
