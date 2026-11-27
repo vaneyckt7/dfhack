@@ -1013,7 +1013,7 @@ const struct_identity *read_find_subclass(const struct_identity *type, const std
 // pointers, but is laid out as any other array, and its item type is the pointer.
 identity_type read_container_type(const type_identity *type)
 {
-    return dynamic_cast<const df::buffer_container_identity*>(type) ? IDTYPE_BUFFER : type->type();
+    return type->type();
 }
 
 // Works out what kind of container is at idx, where it is and how much it holds.
