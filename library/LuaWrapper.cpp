@@ -2793,7 +2793,6 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
         bool was_running;
         ~GcPause() { if (was_running) lua_gc(state, LUA_GCRESTART, 0); }
     } gc_pause{state, lua_gc(state, LUA_GCISRUNNING, 0) != 0};
-    lua_gc(state, LUA_GCSTOP, 0);
 
     lua_Integer found = 0;
     lua_Integer place = 0;
