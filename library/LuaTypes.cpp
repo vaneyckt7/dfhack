@@ -339,6 +339,20 @@ void bit_container_identity::lua_item_write(lua_State *state, int fname_idx, voi
         field_error(state, fname_idx, "boolean or number expected", "write");
 }
 
+bool bit_container_identity::lua_insert2(lua_State *state, int fname_idx, void *ptr, int idx, int val_index) const
+{
+    // Bit containers have no item type, so the generic implementation cannot be used.
+    bool val = false;
+    if (lua_isboolean(state, val_index) || lua_isnil(state, val_index))
+        val = lua_toboolean(state, val_index);
+    else if (lua_isnumber(state, val_index))
+        val = lua_tointeger(state, val_index) != 0;
+    else
+        field_error(state, fname_idx, "boolean or number expected", "insert");
+
+    return insert(ptr, idx, &val);
+}
+
 /**
  * Resolve the field name in UPVAL_FIELDTABLE, die if not found.
  */

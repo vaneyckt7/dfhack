@@ -190,6 +190,7 @@ namespace DFHack
         virtual void lua_item_reference(lua_State *state, int fname_idx, void *ptr, int idx) const override;
         virtual void lua_item_read(lua_State *state, int fname_idx, void *ptr, int idx) const override;
         virtual void lua_item_write(lua_State *state, int fname_idx, void *ptr, int idx, int val_index) const override;
+        virtual bool lua_insert2(lua_State *state, int fname_idx, void *ptr, int idx, int val_index) const override;
 
     protected:
         virtual void *item_pointer(const type_identity *, void *, int) const override { return NULL; }
@@ -501,6 +502,12 @@ namespace DFHack
                 else if constexpr (!bit_container<T> && index_insertable<storage>) {
                     auto &ct = *(storage*)ptr;
                     ct.insert(ct.begin()+index, *(typename T::value_type*)pitem);
+                    return true;
+                }
+                else if constexpr (bit_indexable<T> && index_insertable<storage>) {
+                    // pitem points to a bool (see bit_container_identity::lua_insert2)
+                    auto &ct = *(storage*)ptr;
+                    ct.insert(ct.begin()+index, *(bool*)pitem);
                     return true;
                 }
                 else
