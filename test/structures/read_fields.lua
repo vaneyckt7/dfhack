@@ -2782,7 +2782,7 @@ local function random_reads(seed, rounds)
 end
 
 function test.random_reads_match_plain_lua()
-    for seed = 1, 4 do
-        expect.eq(random_reads(seed, 250), 0, 'seed ' .. seed)
+    for seed = 1, 40 do
+        expect.eq(random_reads(seed, 500), 0, 'seed ' .. seed)
     end
 end
