@@ -148,8 +148,8 @@ jobs:
             -G Ninja \
             -DCMAKE_INSTALL_PREFIX=build/image \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer -g1 -Wno-error=maybe-uninitialized' \
-            -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer -g1 -Wno-error=maybe-uninitialized' \
+            -DCMAKE_CXX_FLAGS='-fsanitize=address -fno-omit-frame-pointer -g1 -Wno-error=maybe-uninitialized' \
+            -DCMAKE_C_FLAGS='-fsanitize=address -fno-omit-frame-pointer -g1 -Wno-error=maybe-uninitialized' \
             -DDFHACK_RUN_URL='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
             ${{ inputs.platform-files && '-DCMAKE_C_COMPILER_LAUNCHER=ccache' || '' }} \
             ${{ inputs.platform-files && '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache' || '' }} \
