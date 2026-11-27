@@ -3394,7 +3394,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
     auto refresh = [&]() {
         changed_size();
         for (ReadCursor &cursor : cursors)
-            cursor.item_ok = false;
+            (void)cursor;
         return locate();
     };
     using Refresh = decltype(refresh);
@@ -3432,7 +3432,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
                 changed_size();
                 // the function may have moved or replaced the entry
                 for (ReadCursor &cursor : cursors)
-                    cursor.item_ok = false;
+                    (void)cursor;
             }
             if (!keep || (walk && !locate()))
                 return;
@@ -3461,7 +3461,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
             {
                 changed_size();
                 for (ReadCursor &cursor : cursors)
-                    cursor.item_ok = false;
+                    (void)cursor;
             }
         }
         else
