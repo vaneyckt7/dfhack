@@ -3069,9 +3069,9 @@ local function random_grid_reads(seed, rounds, only)
 end
 
 function test.random_reads_match_plain_lua()
-    for seed = 1, 4 do
-        expect.eq(random_reads(seed, 250), 0, 'seed ' .. seed)
-        expect.eq(random_grid_reads(seed, 100), 0, 'grids, seed ' .. seed)
+    for seed = 1, 20 do
+        expect.eq(random_reads(seed, 1500), 0, 'seed ' .. seed)
+        expect.eq(random_grid_reads(seed, 600), 0, 'grids, seed ' .. seed)
     end
 end
 
