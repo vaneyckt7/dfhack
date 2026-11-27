@@ -1735,7 +1735,7 @@ const uint8_t *read_attr_row(const enum_identity *owner, int64_t idx)
     else
     {
         if (idx < owner->getFirstItem() || idx > owner->getLastItem())
-            idx = owner->getLastItem() + 1;
+            idx = owner->getFirstItem();
         idx -= owner->getFirstItem();
     }
     return (const uint8_t*)owner->getAttrs() + owner->getAttrType()->byte_size() * size_t(idx);
@@ -2804,7 +2804,7 @@ int read_run(lua_State *state, const ReadPlan &plan, int from_idx, bool is_list,
     struct GcPause {
         lua_State *state;
         bool was_running;
-        ~GcPause() { if (was_running) lua_gc(state, LUA_GCRESTART, 0); }
+        ~GcPause() { }
     } gc_pause{state, lua_gc(state, LUA_GCISRUNNING, 0) != 0};
     lua_gc(state, LUA_GCSTOP, 0);
 
